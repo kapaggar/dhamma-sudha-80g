@@ -77,8 +77,7 @@ function doGet(e) {
   tmpl.centerName = getCenterName();
 
   return tmpl.evaluate()
-    .setTitle('PAN Submission - 80G Certificate')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DENY);
+    .setTitle('PAN Submission - 80G Certificate');
 }
 
 function errorPage(title, msg) {
@@ -101,20 +100,25 @@ function formatDateForDisplay_(d) {
 // ---------------------------------------------------------------------------
 
 function submitForm(data) {
+  // Diagnostic logging for token issues
+  Logger.log('submitForm called. email=' + JSON.stringify(data.email) +
+    ' token length=' + (data.token ? data.token.length : 0));
+
   if (!validateToken(data.token, data.email)) {
+    Logger.log('Token mismatch. Expected: ' + generateToken(data.email || ''));
+    Logger.log('Got:              ' + data.token);
     return { success: false, error: 'Invalid or tampered submission token.' };
   }
   if (!data.consent) {
     return { success: false, error: 'Consent is required to proceed.' };
   }
-  if (!data.pan || !data.pan_name) {
-    return { success: false, error: 'PAN and Name as per PAN are required.' };
+  if (!data.pan) {
+    return { success: false, error: 'PAN is required.' };
   }
 
   const r = validateAndNormalizePAN(data.pan);
   if (!r.valid) return { success: false, error: r.error };
   const pan = r.pan;
-  const panName = data.pan_name.trim().toUpperCase();
 
   const ss = getSpreadsheet();
   const donorsSheet = ss.getSheetByName('donors_input');
@@ -126,18 +130,22 @@ function submitForm(data) {
   const allData = donorsSheet.getDataRange().getValues();
   const now = new Date().toISOString();
   const updatedReceipts = [];
+  let donorName = '';
+  let donorMobile = '';
 
-  // Update all need_pan rows for this email
+  // Update all need_pan rows for this email; pan_name = existing full_name on file
   for (let i = 1; i < allData.length; i++) {
     const row = allData[i];
     if ((row[4] || '').toString().toLowerCase().trim() !== emailLower) continue;
-    if (row[20] !== 'need_pan') continue;
+    if (!donorName && row[3]) donorName = row[3];
+    if (!donorMobile && row[5]) donorMobile = row[5];
 
+    if (row[20] !== 'need_pan') continue;
     const rowNum = i + 1;
-    donorsSheet.getRange(rowNum, 19).setValue(pan);          // S pan_collected
-    donorsSheet.getRange(rowNum, 20).setValue(panName);      // T pan_name
-    donorsSheet.getRange(rowNum, 21).setValue('have_pan');   // U pan_status
-    donorsSheet.getRange(rowNum, 24).setValue(now);          // X pan_submitted_at
+    donorsSheet.getRange(rowNum, 19).setValue(pan);                          // S pan_collected
+    donorsSheet.getRange(rowNum, 20).setValue(donorName.toUpperCase());      // T pan_name (from existing record)
+    donorsSheet.getRange(rowNum, 21).setValue('have_pan');                   // U pan_status
+    donorsSheet.getRange(rowNum, 24).setValue(now);                          // X pan_submitted_at
     updatedReceipts.push(row[0]);
   }
 
@@ -145,11 +153,10 @@ function submitForm(data) {
     return { success: false, error: 'No pending PAN requests found. You may have already submitted.' };
   }
 
-  // Create submission record
   const subSheet = ss.getSheetByName('submissions');
   const subId = Utilities.getUuid();
   subSheet.appendRow([
-    subId, emailLower, (data.mobile || '').trim(), pan, panName,
+    subId, emailLower, donorMobile, pan, donorName.toUpperCase(),
     updatedReceipts.join(','), updatedReceipts.length,
     now, data.token, now, now, ''
   ]);
@@ -157,7 +164,6 @@ function submitForm(data) {
   auditLog(ss, 'form_submit', 'pan_collected',
     emailLower, 'pan', '', maskPAN(pan), subId);
 
-  // Update email_log
   const logSheet = ss.getSheetByName('email_log');
   if (logSheet && logSheet.getLastRow() > 1) {
     const logData = logSheet.getDataRange().getValues();
@@ -176,6 +182,25 @@ function submitForm(data) {
 // One-time setup
 // ---------------------------------------------------------------------------
 
+function migrateSchema() {
+  const ss = getSpreadsheet();
+  const sheet = ss.getSheetByName('donors_input');
+  if (!sheet) { SpreadsheetApp.getUi().alert('donors_input sheet not found.'); return; }
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  let added = 0;
+  if (headers.indexOf('dana_donation_id') < 0) {
+    sheet.getRange(1, sheet.getLastColumn() + 1).setValue('dana_donation_id')
+      .setFontWeight('bold').setBackground('#3c6e47').setFontColor('#ffffff');
+    added++;
+  }
+  if (headers.indexOf('dana_updated_at') < 0) {
+    sheet.getRange(1, sheet.getLastColumn() + 1).setValue('dana_updated_at')
+      .setFontWeight('bold').setBackground('#3c6e47').setFontColor('#ffffff');
+    added++;
+  }
+  SpreadsheetApp.getUi().alert('Schema migration: added ' + added + ' column(s).');
+}
+
 function initSheets() {
   const ss = getSpreadsheet();
 
@@ -187,7 +212,8 @@ function initSheets() {
     'payment_mode', 'amount', 'merchant_ref',
     'id_type', 'id_value',
     'pan_collected', 'pan_name', 'pan_status',
-    'comment', 'imported_at', 'pan_submitted_at'
+    'comment', 'imported_at', 'pan_submitted_at',
+    'dana_donation_id', 'dana_updated_at'
   ]);
 
   getOrCreateSheet(ss, 'submissions', [

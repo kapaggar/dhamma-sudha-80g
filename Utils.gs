@@ -14,9 +14,24 @@ function generateToken(email) {
 }
 
 function validateToken(token, email) {
-  if (!token || !email) return false;
-  try { return token === generateToken(email); }
-  catch (e) { Logger.log('validateToken error: ' + e.message); return false; }
+  if (!token || !email) {
+    Logger.log('validateToken: missing token or email. token=' + !!token + ' email=' + !!email);
+    return false;
+  }
+  try {
+    const expected = generateToken(email);
+    const match = token === expected;
+    if (!match) {
+      Logger.log('validateToken mismatch for email=' + email);
+      Logger.log('  expected: ' + expected);
+      Logger.log('  got:      ' + token);
+      Logger.log('  expected length: ' + expected.length + ', got length: ' + token.length);
+    }
+    return match;
+  } catch (e) {
+    Logger.log('validateToken error: ' + e.message);
+    return false;
+  }
 }
 
 function validateAndNormalizePAN(raw) {
