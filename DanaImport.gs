@@ -139,20 +139,96 @@ function runDanaImport_(startDate, endDate) {
 
   const sessionCookie = loginToDana_(baseUrl, user, pass, false);
 
+  // Step 1: GET /donation-report to extract form_build_id and form_token
+  const formResp = UrlFetchApp.fetch(baseUrl + '/donation-report', {
+    headers: {
+      Cookie: sessionCookie,
+      'User-Agent': DANA_USER_AGENT,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+    },
+    muteHttpExceptions: true,
+    followRedirects: true
+  });
+  if (formResp.getResponseCode() !== 200) {
+    throw new Error('Failed to load /donation-report: HTTP ' + formResp.getResponseCode());
+  }
+  const formHtml = formResp.getContentText();
+  const fbMatch = formHtml.match(/name="form_build_id"[^>]+value="([^"]+)"/);
+  const ftMatch = formHtml.match(/name="form_token"[^>]+value="([^"]+)"/);
+  if (!fbMatch) throw new Error('Could not find form_build_id in /donation-report');
+  if (!ftMatch) throw new Error('Could not find form_token in /donation-report');
+  const formBuildId = fbMatch[1];
+  const formToken = ftMatch[1];
+  Logger.log('form_build_id: ' + formBuildId.substring(0, 20) + '...');
+  Logger.log('form_token: ' + formToken.substring(0, 20) + '...');
+
+  const sessionCookie2 = extractCookies_(formResp, sessionCookie);
+
+  // Step 2: POST the donation-report form to submit the date range query
+  // This sets up the session state required for the excel export endpoint.
+  const postResp = UrlFetchApp.fetch(baseUrl + '/donation-report', {
+    method: 'post',
+    payload: {
+      form_build_id: formBuildId,
+      form_token: formToken,
+      form_id: 'donation_report_form',
+      r_from: startDate,
+      r_to: endDate,
+      r_foreign: 'all',
+      r_category: 'all',
+      r_id_type: 'all',
+      r_course: '',
+      r_receipt: '',
+      r_name: '',
+      r_user: '',
+      min_amount: '',
+      max_amount: '',
+      photo_id: '',
+      op: 'Get Report'
+    },
+    headers: {
+      Cookie: sessionCookie2,
+      'User-Agent': DANA_USER_AGENT,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Referer': baseUrl + '/donation-report'
+    },
+    muteHttpExceptions: true,
+    followRedirects: true
+  });
+  Logger.log('Report POST -> HTTP ' + postResp.getResponseCode());
+  if (postResp.getResponseCode() !== 200) {
+    throw new Error('Report POST failed: HTTP ' + postResp.getResponseCode());
+  }
+  const sessionCookie3 = extractCookies_(postResp, sessionCookie2);
+
+  // Step 3: GET the excel export with full param set (matches the link in the HTML)
   const reportUrl = baseUrl + '/donation-report/excel' +
     '?start=' + startDate + '&end=' + endDate +
-    '&foreign=all&category=all&txn_type=all&course=&name=&receipt=&user=';
+    '&foreign=all&category=all&id_type=all' +
+    '&txn_type&don_tags' +
+    '&min_amount=&max_amount=&photo_id=' +
+    '&synced&not_synced&deleted&with_logs' +
+    '&course=&name=&receipt=&user=';
 
+  Logger.log('Fetching excel: ' + reportUrl);
   const reportResp = UrlFetchApp.fetch(reportUrl, {
-    headers: { Cookie: sessionCookie, 'User-Agent': DANA_USER_AGENT },
+    headers: {
+      Cookie: sessionCookie3,
+      'User-Agent': DANA_USER_AGENT,
+      'Accept': 'application/vnd.ms-excel,application/octet-stream,*/*',
+      'Referer': baseUrl + '/donation-report'
+    },
     muteHttpExceptions: true,
     followRedirects: true
   });
 
   const code = reportResp.getResponseCode();
+  Logger.log('Excel fetch HTTP ' + code);
   if (code !== 200) {
-    throw new Error('Report fetch failed: HTTP ' + code +
-      '. Body: ' + reportResp.getContentText().substring(0, 300));
+    const body = reportResp.getContentText();
+    Logger.log('Body (first 2000 chars): ' + body.substring(0, 2000));
+    throw new Error('Excel fetch failed: HTTP ' + code +
+      '. Check Apps Script execution log for full response.');
   }
 
   const ct = (reportResp.getHeaders()['Content-Type'] || '').toLowerCase();
@@ -558,6 +634,23 @@ function testDanaImportLogin() {
     Logger.log('Cookie names: ' + cookie.split(';').map(c => c.trim().split('=')[0]).join(', '));
   } catch (err) {
     Logger.log('=== LOGIN FAILED ===');
+    Logger.log(err.message);
+    Logger.log(err.stack);
+  }
+}
+
+
+/**
+ * Test the full flow: login, get form tokens, POST report query, GET excel.
+ */
+function testDanaReportFetch() {
+  try {
+    const today = Utilities.formatDate(new Date(), 'Asia/Kolkata', 'yyyy-MM-dd');
+    const result = runDanaImport_('2026-04-01', today);
+    Logger.log('=== TEST RESULT ===');
+    Logger.log(JSON.stringify(result, null, 2));
+  } catch (err) {
+    Logger.log('=== TEST FAILED ===');
     Logger.log(err.message);
     Logger.log(err.stack);
   }
