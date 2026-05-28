@@ -12,24 +12,26 @@
     .hdr h1{font-size:19px;font-weight:600}
     .hdr p{font-size:12px;margin-top:5px;opacity:.85}
     .body{padding:26px}
-    .receipts{background:#eef4ee;border-radius:6px;padding:14px 16px;margin-bottom:18px;font-size:13px}
-    .receipts h4{font-size:12px;color:#3c6e47;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
-    .receipt-row{padding:4px 0;border-bottom:1px solid #d8e4d8;color:#444}
+    .donor-info{background:#eef4ee;border-radius:6px;padding:14px 16px;margin-bottom:18px;font-size:13px}
+    .donor-info .row{padding:3px 0;color:#555}
+    .donor-info .label{display:inline-block;width:80px;color:#888;font-size:12px}
+    .donor-info strong{color:#333}
+    .receipts{background:#f9f9f9;border:1px solid #e0e0e0;border-radius:6px;padding:14px 16px;margin-bottom:18px;font-size:13px}
+    .receipts h4{font-size:11px;color:#3c6e47;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
+    .receipt-row{padding:5px 0;border-bottom:1px solid #ececec;color:#444}
     .receipt-row:last-child{border:none}
-    label{display:block;font-size:12px;font-weight:600;margin-bottom:3px;color:#444}
+    label{display:block;font-size:12px;font-weight:600;margin-bottom:4px;color:#444}
     .req{color:#c00}
-    input[type=text],input[type=email],input[type=tel]{
-      width:100%;padding:8px 10px;border:1px solid #ccc;border-radius:4px;font-size:14px}
+    input[type=text]{width:100%;padding:10px 12px;border:1px solid #ccc;border-radius:4px;font-size:16px}
     input:focus{outline:none;border-color:#3c6e47;box-shadow:0 0 0 2px rgba(60,110,71,.12)}
-    input[readonly]{background:#f5f5f5;color:#666}
     .field{margin-bottom:14px}
     .pan-wrap{position:relative}
-    .pan-badge{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:600;pointer-events:none}
+    .pan-badge{position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:600;pointer-events:none}
     .ok{color:#2a7a2a} .err{color:#c00}
     .consent{background:#fffbea;border:1px solid #d6c84a;border-radius:6px;padding:13px;margin-bottom:18px}
     .consent label{display:flex;gap:9px;align-items:flex-start;font-size:13px;font-weight:400;cursor:pointer}
     .consent input[type=checkbox]{margin-top:2px;flex-shrink:0;accent-color:#3c6e47}
-    .submit-btn{width:100%;padding:12px;background:#3c6e47;color:#fff;border:none;
+    .submit-btn{width:100%;padding:13px;background:#3c6e47;color:#fff;border:none;
                 border-radius:6px;font-size:15px;font-weight:600;cursor:pointer}
     .submit-btn:hover{background:#2e5538}
     .submit-btn:disabled{background:#aaa;cursor:default}
@@ -38,7 +40,7 @@
     .alert-err{background:#f4cccc;color:#9b1c1c;border:1px solid #e06666}
     .done{text-align:center;padding:40px 20px}
     .done h2{color:#2d6a2d;font-size:22px;margin-bottom:10px}
-    .privacy{font-size:11px;color:#999;text-align:center;margin-top:16px}
+    .privacy{font-size:11px;color:#999;text-align:center;margin-top:14px}
   </style>
 </head>
 <body>
@@ -61,45 +63,31 @@
     <? } else { ?>
     <div id="alertBox" class="alert"></div>
 
+    <div class="donor-info">
+      <div class="row"><span class="label">Name:</span> <strong><?= donorName ?></strong></div>
+      <div class="row"><span class="label">Email:</span> <strong><?= email ?></strong></div>
+      <? if (mobile) { ?><div class="row"><span class="label">Mobile:</span> <strong><?= mobile ?></strong></div><? } ?>
+    </div>
+
     <div class="receipts">
       <h4>Your Pending Donations (<?= pendingReceipts.length ?>)</h4>
       <? for (var i = 0; i < pendingReceipts.length; i++) { var r = pendingReceipts[i]; ?>
       <div class="receipt-row">
         <strong><?= r.receiptNo ?></strong> &middot; <?= r.txnDate ?>
         <? if (r.amount) { ?> &middot; Rs. <?= r.amount ?><? } ?>
-        <? if (r.course) { ?> &middot; <?= r.course ?><? } ?>
       </div>
       <? } ?>
     </div>
 
-    <p style="font-size:13px;color:#555;margin-bottom:16px">
-      The PAN you submit will apply to <strong>all <?= pendingReceipts.length ?> donations</strong> listed above.
+    <p style="font-size:13px;color:#555;margin-bottom:18px">
+      The PAN you submit will apply to all <strong><?= pendingReceipts.length ?> donation<?= pendingReceipts.length > 1 ? 's' : '' ?></strong> listed above.
     </p>
-
-    <div class="field">
-      <label>Email <span class="req">*</span></label>
-      <input type="email" id="f_email" value="<?= email ?>" readonly>
-    </div>
-
-    <div class="field">
-      <label>Donor Name <span class="req">*</span></label>
-      <input type="text" id="f_name" value="<?= donorName ?>" placeholder="Full name">
-    </div>
-
-    <div class="field">
-      <label>Mobile <span class="req">*</span></label>
-      <input type="tel" id="f_mobile" value="<?= mobile ?>" placeholder="10-digit mobile" maxlength="15">
-    </div>
-
-    <div class="field">
-      <label>Name as per PAN Card <span class="req">*</span></label>
-      <input type="text" id="f_panname" placeholder="Exactly as printed on PAN card">
-    </div>
 
     <div class="field pan-wrap">
       <label>PAN Number <span class="req">*</span></label>
       <input type="text" id="f_pan" placeholder="ABCDE1234F" maxlength="12"
-        oninput="onPAN(this)" style="text-transform:uppercase;letter-spacing:1px">
+        oninput="onPAN(this)" autocomplete="off"
+        style="text-transform:uppercase;letter-spacing:2px;font-family:monospace">
       <span class="pan-badge" id="pan_badge"></span>
     </div>
 
@@ -110,15 +98,15 @@
       </label>
     </div>
 
-    <button type="button" class="submit-btn" id="submitBtn" onclick="handleSubmit()">Submit PAN Details</button>
+    <button type="button" class="submit-btn" id="submitBtn" onclick="handleSubmit()">Submit PAN</button>
     <p class="privacy">Secure personalized link - one PAN applies to all your donations</p>
     <? } ?>
   </div>
 </div>
 
 <script>
-  var EMAIL = <?= JSON.stringify(email) ?>;
-  var TOKEN = <?= JSON.stringify(token) ?>;
+  var EMAIL = <?!= JSON.stringify(email) ?>;
+  var TOKEN = <?!= JSON.stringify(token) ?>;
 
   function onPAN(input) {
     var v = input.value.toUpperCase().replace(/\s+/g,'');
@@ -132,8 +120,6 @@
     }
   }
 
-  function v(id) { var el=document.getElementById(id); return el ? el.value.trim() : ''; }
-
   function showAlert(type, msg) {
     var el = document.getElementById('alertBox');
     el.className = 'alert alert-'+(type==='error'?'err':'ok');
@@ -143,17 +129,11 @@
   }
 
   function handleSubmit() {
-    var name = v('f_name');
-    var mobile = v('f_mobile');
-    var panName = v('f_panname');
-    var pan = v('f_pan').toUpperCase().replace(/\s+/g,'');
+    var pan = document.getElementById('f_pan').value.trim().toUpperCase().replace(/\s+/g,'');
     var consent = document.getElementById('f_consent').checked;
     var btn = document.getElementById('submitBtn');
 
-    if (!name)    { showAlert('error','Please enter your name.'); return; }
-    if (!mobile)  { showAlert('error','Please enter your mobile number.'); return; }
-    if (!panName) { showAlert('error','Please enter Name as per PAN.'); return; }
-    if (!pan)     { showAlert('error','Please enter PAN number.'); return; }
+    if (!pan) { showAlert('error','Please enter your PAN number.'); return; }
     if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan)) {
       showAlert('error','Invalid PAN format. Expected: ABCDE1234F'); return;
     }
@@ -171,19 +151,15 @@
         } else {
           showAlert('error', res.error || 'Submission failed.');
           btn.disabled = false;
-          btn.textContent = 'Submit PAN Details';
+          btn.textContent = 'Submit PAN';
         }
       })
       .withFailureHandler(function(err) {
         showAlert('error','Error: ' + (err.message || 'Unknown error'));
         btn.disabled = false;
-        btn.textContent = 'Submit PAN Details';
+        btn.textContent = 'Submit PAN';
       })
-      .submitForm({
-        token: TOKEN, email: EMAIL,
-        mobile: mobile, name: name,
-        pan_name: panName, pan: pan, consent: true
-      });
+      .submitForm({ token: TOKEN, email: EMAIL, pan: pan, consent: true });
   }
 </script>
 </body>

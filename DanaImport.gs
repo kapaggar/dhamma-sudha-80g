@@ -4,6 +4,19 @@
 // Requires: enable "Drive API" advanced service
 // Requires Script Properties: DANA_URL, DANA_USER, DANA_PASS
 
+// Reads a Script Property and base64-decodes it. Avoids plaintext in the
+// Script Properties UI for screen-share scenarios. Not a security boundary.
+function _readProp(key) {
+  const raw = PropertiesService.getScriptProperties().getProperty(key);
+  if (!raw) return null;
+  try {
+    return Utilities.newBlob(Utilities.base64Decode(raw)).getDataAsString();
+  } catch (_) {
+    // Backward compat: if value isn't base64, return as-is
+    return raw;
+  }
+}
+
 const DANA_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
 // ---------------------------------------------------------------------------
@@ -80,7 +93,7 @@ function importFromUploadedFile() {
   if (!fileId) return;
 
   try {
-    const result = processXlsFile_(fileId, false);
+    const result = processXlsFile_(fileId, false, {});
     showImportResult_(result, 'uploaded file');
   } catch (err) {
     ui.alert('Import failed: ' + err.message);
@@ -129,10 +142,9 @@ function getDefaultRange_() {
 // ---------------------------------------------------------------------------
 
 function runDanaImport_(startDate, endDate) {
-  const props = PropertiesService.getScriptProperties();
-  const baseUrl = props.getProperty('DANA_URL');
-  const user = props.getProperty('DANA_USER');
-  const pass = props.getProperty('DANA_PASS');
+  const baseUrl = PropertiesService.getScriptProperties().getProperty('DANA_URL');
+  const user    = PropertiesService.getScriptProperties().getProperty('DANA_USER');
+  const pass    = _readProp('DANA_PASS');
   if (!baseUrl || !user || !pass) {
     throw new Error('Missing Script Properties: DANA_URL, DANA_USER, DANA_PASS');
   }
@@ -201,6 +213,10 @@ function runDanaImport_(startDate, endDate) {
   }
   const sessionCookie3 = extractCookies_(postResp, sessionCookie2);
 
+  // Parse receipt_no -> donation_id from edit links in the HTML response
+  const receiptToDonationId = parseReceiptToDonationIdMap_(postResp.getContentText());
+  Logger.log('Parsed ' + Object.keys(receiptToDonationId).length + ' receipt -> donation_id mappings');
+
   // Step 3: GET the excel export with full param set (matches the link in the HTML)
   const reportUrl = baseUrl + '/donation-report/excel' +
     '?start=' + startDate + '&end=' + endDate +
@@ -244,7 +260,7 @@ function runDanaImport_(startDate, endDate) {
   );
 
   try {
-    const result = processXlsFile_(tempFile.id, true);
+    const result = processXlsFile_(tempFile.id, true, receiptToDonationId);
     result.startDate = startDate;
     result.endDate = endDate;
     logImport_(startDate, endDate, result);
@@ -254,7 +270,7 @@ function runDanaImport_(startDate, endDate) {
   }
 }
 
-function processXlsFile_(fileId, isAlreadyGoogleSheet) {
+function processXlsFile_(fileId, isAlreadyGoogleSheet, receiptToDonationId) {
   let sheetId = fileId;
   let cleanup = false;
 
@@ -275,7 +291,7 @@ function processXlsFile_(fileId, isAlreadyGoogleSheet) {
     const data = sheet.getDataRange().getValues();
     if (data.length < 2) throw new Error('Report is empty.');
     const headerMap = mapColumns_(data[0]);
-    return processRows_(data, headerMap);
+    return processRows_(data, headerMap, receiptToDonationId || {});
   } finally {
     if (cleanup) {
       try { DriveApp.getFileById(sheetId).setTrashed(true); } catch (_) {}
@@ -459,7 +475,7 @@ function mapColumns_(headers) {
   return idx;
 }
 
-function processRows_(data, idx) {
+function processRows_(data, idx, receiptToDonationId) {
   const ss = SpreadsheetApp.openById(
     PropertiesService.getScriptProperties().getProperty('SHEET_ID'));
   const donorsSheet = ss.getSheetByName('donors_input');
@@ -551,7 +567,9 @@ function processRows_(data, idx) {
       panStatus,
       idx.comment >= 0 ? toStr_(row[idx.comment]) : '',
       now,
-      ''
+      '',
+      receiptToDonationId[receiptNo] || '',  // Y dana_donation_id
+      ''                                      // Z dana_updated_at
     ]);
   }
 
@@ -622,11 +640,10 @@ function formatDateTime_(v) {
  */
 function testDanaImportLogin() {
   try {
-    const props = PropertiesService.getScriptProperties();
     const cookie = loginToDana_(
-      props.getProperty('DANA_URL'),
-      props.getProperty('DANA_USER'),
-      props.getProperty('DANA_PASS'),
+      PropertiesService.getScriptProperties().getProperty('DANA_URL'),
+      PropertiesService.getScriptProperties().getProperty('DANA_USER'),
+      _readProp('DANA_PASS'),
       true  // verbose
     );
     Logger.log('=== LOGIN OK ===');
@@ -654,4 +671,30 @@ function testDanaReportFetch() {
     Logger.log(err.message);
     Logger.log(err.stack);
   }
+}
+
+
+/**
+ * Parse the /donation-report HTML response to build a map of receipt_no -> donation_id.
+ * Looks for /donation/edit/{id} links and finds the nearest ER[\d]+ receipt before each.
+ */
+function parseReceiptToDonationIdMap_(html) {
+  const map = {};
+  const editRe = /\/donation\/edit\/(\d+)/g;
+  let m;
+  const positions = [];
+  while ((m = editRe.exec(html)) !== null) {
+    positions.push({ donationId: m[1], pos: m.index });
+  }
+
+  positions.forEach(p => {
+    const start = Math.max(0, p.pos - 3000);
+    const region = html.substring(start, p.pos);
+    const localRe = /\b(ER-?\d+)\b/g;
+    let lastMatch = null, lm;
+    while ((lm = localRe.exec(region)) !== null) lastMatch = lm;
+    if (lastMatch) map[lastMatch[1]] = p.donationId;
+  });
+
+  return map;
 }
