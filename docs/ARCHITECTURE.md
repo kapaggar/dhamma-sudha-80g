@@ -5,34 +5,34 @@
 Everything runs on **Google Apps Script** (GAS). There is no external server, no Docker, no cloud infrastructure to provision. The runtime is Google's V8-based Apps Script environment, deployed as a Web App.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Google Account                              │
-│                                                                     │
+┌────────────────────────────────────────────────────────────────────┐
+│                         Google Account                             │
+│                                                                    │
 │  ┌─────────────────────┐       ┌─────────────────────────────────┐ │
 │  │   Google Sheets     │       │     Apps Script Project         │ │
 │  │                     │       │                                 │ │
-│  │  donors_input       │◄─────►│  Code.gs      (web app + init) │ │
-│  │  submissions        │       │  DanaImport.gs (dana scraper)  │ │
-│  │  email_log          │       │  WriteBack.gs  (dana editor)   │ │
-│  │  audit_log          │       │  Email.gs      (MailApp)       │ │
-│  │  import_log         │       │  Admin.gs      (menu + views)  │ │
-│  │  ready_for_80g      │       │  Utils.gs      (shared)        │ │
-│  │  admin_review       │       │  Tests.gs      (unit tests)    │ │
+│  │  donors_input       │◄─────►│  Code.gs      (web app + init)  │ │
+│  │  submissions        │       │  DanaImport.gs (dana scraper)   │ │
+│  │  email_log          │       │  WriteBack.gs  (dana editor)    │ │
+│  │  audit_log          │       │  Email.gs      (MailApp)        │ │
+│  │  import_log         │       │  Admin.gs      (menu + views)   │ │
+│  │  ready_for_80g      │       │  Utils.gs      (shared)         │ │
+│  │  admin_review       │       │  Tests.gs      (unit tests)     │ │
 │  └─────────────────────┘       │                                 │ │
-│                                │  Form.html     (donor UI)      │ │
-│                                │  ImportDialog.html (admin UI)  │ │
+│                                │  Form.html     (donor UI)       │ │
+│                                │  ImportDialog.html (admin UI)   │ │
 │                                └────────────┬────────────────────┘ │
 │                                             │                      │
 └─────────────────────────────────────────────┼──────────────────────┘
                                               │
-                    ┌─────────────────────────┼───────────────────────┐
-                    │   External Services     │                       │
-                    │                         ▼                       │
+                    ┌─────────────────────────┼──────────────────────┐
+                    │   External Services     │                      │
+                    │                         ▼                      │
                     │  ┌─────────────────────────────────────────┐   │
                     │  │  Google Drive API v2                    │   │
                     │  │  (XLS → Google Sheet conversion)        │   │
                     │  └─────────────────────────────────────────┘   │
-                    │                                                 │
+                    │                                                │
                     │  ┌─────────────────────────────────────────┐   │
                     │  │  dana portal (Drupal 7 / Cloudflare)    │   │
                     │  │  sudha.dana.vridhamma.org               │   │
@@ -41,12 +41,12 @@ Everything runs on **Google Apps Script** (GAS). There is no external server, no
                     │  │  /donation-report     (HTML + XLS)      │   │
                     │  │  /donation/edit/{id}  (write-back)      │   │
                     │  └─────────────────────────────────────────┘   │
-                    │                                                 │
+                    │                                                │
                     │  ┌─────────────────────────────────────────┐   │
                     │  │  MailApp (Google)                       │   │
                     │  │  Sends HTML emails from GAS account     │   │
                     │  └─────────────────────────────────────────┘   │
-                    └─────────────────────────────────────────────────┘
+                    └────────────────────────────────────────────────┘
 ```
 
 ## Web App
