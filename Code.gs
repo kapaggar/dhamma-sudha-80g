@@ -17,60 +17,64 @@ function getCenterName() {
 
 function doGet(e) {
   const p = e.parameter;
-  const token    = p.token;
-  const courseId = p.course_id;
-  const email    = p.email;
+  const token = p.token;
+  const email = p.email;
 
-  if (!token || !courseId || !email) {
+  if (!token || !email) {
     return errorPage('Invalid Link', 'This link is missing required parameters. Please use the original link from your email.');
   }
-  if (!validateToken(token, courseId, email)) {
+  if (!validateToken(token, email)) {
     return errorPage('Invalid Link', 'This link appears to be invalid or tampered. Please use the original link from your email.');
   }
 
   const ss = getSpreadsheet();
+  const donorsSheet = ss.getSheetByName('donors_input');
 
-  // Check for existing submission
-  let alreadySubmitted = false;
-  const submissionsSheet = ss.getSheetByName('submissions');
-  if (submissionsSheet && submissionsSheet.getLastRow() > 1) {
-    const data = submissionsSheet.getDataRange().getValues();
-    alreadySubmitted = data.slice(1).some(row =>
-      row[2] === email.toLowerCase().trim() &&
-      row[1] === courseId.trim() &&
-      ['pending_review', 'validated', 'merged'].includes(row[12])
-    );
+  if (!donorsSheet || donorsSheet.getLastRow() < 2) {
+    return errorPage('No Records', 'No donation records found for this email.');
   }
 
-  // Prefill from donors_input
-  let prefillName = '', prefillMobile = '', courseStart = '', courseEnd = '';
-  const donorsSheet = ss.getSheetByName('donors_input');
-  if (donorsSheet && donorsSheet.getLastRow() > 1) {
-    const donors = donorsSheet.getDataRange().getValues();
-    for (let i = 1; i < donors.length; i++) {
-      const row = donors[i];
-      if (row[0] === courseId.trim() && row[4].toLowerCase().trim() === email.toLowerCase().trim()) {
-        prefillName   = row[3] || '';
-        prefillMobile = row[5] || '';
-        try {
-          if (row[1]) courseStart = Utilities.formatDate(new Date(row[1]), 'Asia/Kolkata', 'dd MMM yyyy');
-          if (row[2]) courseEnd   = Utilities.formatDate(new Date(row[2]), 'Asia/Kolkata', 'dd MMM yyyy');
-        } catch (_) {}
-        break;
-      }
+  // Find all need_pan rows for this email
+  const data = donorsSheet.getDataRange().getValues();
+  const emailLower = email.toLowerCase().trim();
+  const pendingReceipts = [];
+  let donorName = '';
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if ((row[4] || '').toString().toLowerCase().trim() !== emailLower) continue;
+    if (!donorName) donorName = row[3] || '';
+
+    if (row[20] === 'need_pan') {
+      pendingReceipts.push({
+        receiptNo: row[0],
+        txnDate: formatDateForDisplay_(row[1]),
+        amount: row[14],
+        course: row[10] || 'Donation'
+      });
+    }
+  }
+
+  // Already submitted? (no need_pan rows but some have_pan rows)
+  const alreadySubmitted = pendingReceipts.length === 0 && data.some(r =>
+    (r[4] || '').toString().toLowerCase().trim() === emailLower);
+
+  // Get the first mobile we find for this email
+  let mobile = '';
+  for (let i = 1; i < data.length; i++) {
+    if ((data[i][4] || '').toString().toLowerCase().trim() === emailLower && data[i][5]) {
+      mobile = data[i][5]; break;
     }
   }
 
   const tmpl = HtmlService.createTemplateFromFile('Form');
-  tmpl.courseId        = courseId;
-  tmpl.email           = email;
-  tmpl.token           = token;
-  tmpl.prefillName     = prefillName;
-  tmpl.prefillMobile   = prefillMobile;
-  tmpl.courseStart     = courseStart;
-  tmpl.courseEnd       = courseEnd;
-  tmpl.centerName      = getCenterName();
+  tmpl.email = email;
+  tmpl.token = token;
+  tmpl.donorName = donorName;
+  tmpl.mobile = mobile;
+  tmpl.pendingReceipts = pendingReceipts;
   tmpl.alreadySubmitted = alreadySubmitted;
+  tmpl.centerName = getCenterName();
 
   return tmpl.evaluate()
     .setTitle('PAN Submission - 80G Certificate')
@@ -84,85 +88,88 @@ function errorPage(title, msg) {
   ).setTitle(title);
 }
 
+function formatDateForDisplay_(d) {
+  if (!d) return '';
+  try {
+    if (d instanceof Date) return Utilities.formatDate(d, 'Asia/Kolkata', 'dd MMM yyyy');
+    return d.toString();
+  } catch (_) { return d.toString(); }
+}
+
 // ---------------------------------------------------------------------------
-// Form submission - called via google.script.run from Form.html
+// Form submission
 // ---------------------------------------------------------------------------
 
 function submitForm(data) {
-  // Server-side re-validation of token
-  if (!validateToken(data.token, data.course_id, data.email)) {
+  if (!validateToken(data.token, data.email)) {
     return { success: false, error: 'Invalid or tampered submission token.' };
   }
   if (!data.consent) {
     return { success: false, error: 'Consent is required to proceed.' };
   }
-  if (!data.donors || data.donors.length === 0) {
-    return { success: false, error: 'No donor information provided.' };
+  if (!data.pan || !data.pan_name) {
+    return { success: false, error: 'PAN and Name as per PAN are required.' };
   }
 
-  // Validate all PANs before writing (fail-fast)
-  for (const d of data.donors) {
-    const r = validateAndNormalizePAN(d.pan);
-    if (!r.valid) return { success: false, error: 'Donor "' + (d.name || 'unnamed') + '": ' + r.error };
-    if (!d.name_as_per_pan || !d.name_as_per_pan.trim()) {
-      return { success: false, error: 'Name as per PAN is required for: ' + (d.name || 'unnamed') };
-    }
-    d.pan_normalized = r.pan;
-  }
+  const r = validateAndNormalizePAN(data.pan);
+  if (!r.valid) return { success: false, error: r.error };
+  const pan = r.pan;
+  const panName = data.pan_name.trim().toUpperCase();
 
   const ss = getSpreadsheet();
-  const subSheet = getOrCreateSheet(ss, 'submissions', [
-    'submission_id', 'course_id', 'donor_email', 'donor_mobile',
-    'name', 'name_as_per_pan', 'pan_normalized',
-    'donation_amount', 'donation_date', 'payment_reference',
-    'consent_timestamp', 'source_link_token', 'status',
-    'created_at', 'updated_at', 'notes'
-  ]);
-
-  const now = new Date().toISOString();
-
-  for (const donor of data.donors) {
-    const dup    = findDuplicateSubmission(subSheet, data.email, donor.pan_normalized, data.course_id);
-    const status = dup ? 'duplicate' : 'pending_review';
-    const subId  = Utilities.getUuid();
-
-    subSheet.appendRow([
-      subId,
-      data.course_id.trim(),
-      data.email.toLowerCase().trim(),
-      (data.mobile || '').trim(),
-      (donor.name || '').trim(),
-      donor.name_as_per_pan.trim().toUpperCase(),
-      donor.pan_normalized,
-      donor.donation_amount  || '',
-      donor.donation_date    || '',
-      donor.payment_reference || '',
-      now,         // consent_timestamp
-      data.token,  // source_link_token
-      status,
-      now,         // created_at
-      now,         // updated_at
-      (donor.notes || '').trim()
-    ]);
-
-    auditLog(ss, 'form_submit', 'insert',
-      data.email + '|' + donor.pan_normalized + '|' + data.course_id,
-      'new_submission', '', subId, subId);
+  const donorsSheet = ss.getSheetByName('donors_input');
+  if (!donorsSheet || donorsSheet.getLastRow() < 2) {
+    return { success: false, error: 'No records found.' };
   }
 
-  // Update email_log: mark submitted
+  const emailLower = data.email.toLowerCase().trim();
+  const allData = donorsSheet.getDataRange().getValues();
+  const now = new Date().toISOString();
+  const updatedReceipts = [];
+
+  // Update all need_pan rows for this email
+  for (let i = 1; i < allData.length; i++) {
+    const row = allData[i];
+    if ((row[4] || '').toString().toLowerCase().trim() !== emailLower) continue;
+    if (row[20] !== 'need_pan') continue;
+
+    const rowNum = i + 1;
+    donorsSheet.getRange(rowNum, 19).setValue(pan);          // S pan_collected
+    donorsSheet.getRange(rowNum, 20).setValue(panName);      // T pan_name
+    donorsSheet.getRange(rowNum, 21).setValue('have_pan');   // U pan_status
+    donorsSheet.getRange(rowNum, 24).setValue(now);          // X pan_submitted_at
+    updatedReceipts.push(row[0]);
+  }
+
+  if (updatedReceipts.length === 0) {
+    return { success: false, error: 'No pending PAN requests found. You may have already submitted.' };
+  }
+
+  // Create submission record
+  const subSheet = ss.getSheetByName('submissions');
+  const subId = Utilities.getUuid();
+  subSheet.appendRow([
+    subId, emailLower, (data.mobile || '').trim(), pan, panName,
+    updatedReceipts.join(','), updatedReceipts.length,
+    now, data.token, now, now, ''
+  ]);
+
+  auditLog(ss, 'form_submit', 'pan_collected',
+    emailLower, 'pan', '', maskPAN(pan), subId);
+
+  // Update email_log
   const logSheet = ss.getSheetByName('email_log');
   if (logSheet && logSheet.getLastRow() > 1) {
     const logData = logSheet.getDataRange().getValues();
     for (let i = 1; i < logData.length; i++) {
-      if (logData[i][0] === data.email.toLowerCase().trim() && logData[i][1] === data.course_id.trim()) {
-        logSheet.getRange(i + 1, 7).setValue(now); // submitted_at
+      if ((logData[i][0] || '').toString().toLowerCase().trim() === emailLower && !logData[i][5]) {
+        logSheet.getRange(i + 1, 6).setValue(now); // submitted_at
         break;
       }
     }
   }
 
-  return { success: true };
+  return { success: true, count: updatedReceipts.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -173,37 +180,39 @@ function initSheets() {
   const ss = getSpreadsheet();
 
   getOrCreateSheet(ss, 'donors_input', [
-    'course_id', 'course_start_date', 'course_end_date',
-    'donor_name', 'email', 'mobile',
-    'donation_amount', 'donation_date', 'payment_reference'
-  ]);
-  getOrCreateSheet(ss, 'submissions', [
-    'submission_id', 'course_id', 'donor_email', 'donor_mobile',
-    'name', 'name_as_per_pan', 'pan_normalized',
-    'donation_amount', 'donation_date', 'payment_reference',
-    'consent_timestamp', 'source_link_token', 'status',
-    'created_at', 'updated_at', 'notes'
-  ]);
-  getOrCreateSheet(ss, 'email_log', [
-    'email', 'course_id', 'sent_at', 'email_status',
-    'reminder_count', 'last_reminder_at', 'submitted_at'
-  ]);
-  getOrCreateSheet(ss, 'audit_log', [
-    'timestamp', 'actor', 'action', 'record_key',
-    'field_changed', 'old_value', 'new_value', 'source_submission_id'
-  ]);
-  getOrCreateSheet(ss, 'validated_for_merge', [
-    'submission_id', 'course_id', 'donor_email', 'donor_mobile',
-    'name', 'name_as_per_pan', 'pan_normalized',
-    'donation_amount', 'donation_date', 'payment_reference',
-    'consent_timestamp', 'status', 'exported_at'
-  ]);
-  getOrCreateSheet(ss, 'master', [
-    'donor_id', 'email', 'mobile', 'name', 'name_as_per_pan', 'pan',
-    'course_id', 'donation_amount', 'donation_date', 'payment_reference',
-    'status', 'certificate_number', 'certificate_issued_at',
-    'created_at', 'updated_at'
+    'receipt_no', 'txn_date', 'created_on',
+    'full_name', 'email', 'mobile',
+    'address', 'city', 'state', 'country',
+    'course', 'category', 'txn_type',
+    'payment_mode', 'amount', 'merchant_ref',
+    'id_type', 'id_value',
+    'pan_collected', 'pan_name', 'pan_status',
+    'comment', 'imported_at', 'pan_submitted_at'
   ]);
 
-  SpreadsheetApp.getUi().alert('All sheets initialized.');
+  getOrCreateSheet(ss, 'submissions', [
+    'submission_id', 'email', 'mobile',
+    'pan', 'pan_name',
+    'receipt_nos', 'receipt_count',
+    'consent_timestamp', 'source_link_token',
+    'created_at', 'updated_at', 'notes'
+  ]);
+
+  getOrCreateSheet(ss, 'email_log', [
+    'email', 'receipt_nos_in_email', 'sent_at',
+    'email_status', 'reminder_count', 'submitted_at', 'last_reminder_at'
+  ]);
+
+  getOrCreateSheet(ss, 'audit_log', [
+    'timestamp', 'actor', 'action', 'record_key',
+    'field_changed', 'old_value', 'new_value', 'source_id'
+  ]);
+
+  getOrCreateSheet(ss, 'import_log', [
+    'import_start', 'import_end', 'imported_at',
+    'total', 'added', 'skipped',
+    'need_pan', 'have_pan', 'auto_filled', 'no_email'
+  ]);
+
+  SpreadsheetApp.getUi().alert('All sheets initialized with new schema.');
 }
