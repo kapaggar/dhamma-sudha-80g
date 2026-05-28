@@ -19,8 +19,15 @@ function sendPendingEmails() {
 
   const sentEmails = new Set();
   if (logSheet.getLastRow() > 1) {
-    const logData = logSheet.getRange(2, 1, logSheet.getLastRow() - 1, 1).getValues();
-    logData.forEach(r => { if (r[0]) sentEmails.add(r[0].toString().toLowerCase().trim()); });
+    // Read email + email_status (cols A..D). Only rows that actually SENT count as
+    // "already emailed"; rows logged "failed: ..." must remain eligible for retry.
+    const logData = logSheet.getRange(2, 1, logSheet.getLastRow() - 1, 4).getValues();
+    logData.forEach(r => {
+      const status = (r[3] || '').toString().toLowerCase();
+      if (r[0] && status.indexOf('sent') === 0) {
+        sentEmails.add(r[0].toString().toLowerCase().trim());
+      }
+    });
   }
 
   const data = donorsSheet.getDataRange().getValues();
