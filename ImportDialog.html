@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <base target="_top">
+  <style>
+    body{font-family:Arial,sans-serif;padding:16px;margin:0;font-size:13px;color:#333}
+    h3{margin:0 0 12px 0;color:#3c6e47}
+    .info{background:#eef4ee;padding:8px 12px;border-radius:4px;margin-bottom:14px;font-size:12px;color:#555}
+    label{display:block;font-weight:600;margin-bottom:4px;font-size:12px}
+    input[type=date]{width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;font-size:14px;margin-bottom:12px}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .actions{margin-top:16px;text-align:right}
+    button{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:13px;margin-left:8px}
+    .primary{background:#3c6e47;color:#fff}
+    .primary:hover{background:#2e5538}
+    .primary:disabled{background:#aaa;cursor:default}
+    .secondary{background:#eee;color:#333}
+    .status{margin-top:14px;padding:10px;border-radius:4px;font-size:12px;display:none}
+    .status.ok{background:#d9ead3;color:#2d6a2d;display:block}
+    .status.err{background:#f4cccc;color:#9b1c1c;display:block}
+    .status.loading{background:#fff3cd;color:#856404;display:block}
+  </style>
+</head>
+<body>
+  <h3>Import from Dana Portal</h3>
+  <div class="info">
+    Last import ended: <strong><?= lastImport ?></strong>
+  </div>
+  <div class="row">
+    <div>
+      <label>Start date</label>
+      <input type="date" id="start" value="<?= defaultStart ?>">
+    </div>
+    <div>
+      <label>End date</label>
+      <input type="date" id="end" value="<?= defaultEnd ?>">
+    </div>
+  </div>
+  <div class="actions">
+    <button class="secondary" onclick="google.script.host.close()">Cancel</button>
+    <button class="primary" id="goBtn" onclick="runImport()">Import</button>
+  </div>
+  <div class="status" id="status"></div>
+
+<script>
+  function runImport() {
+    var start = document.getElementById('start').value;
+    var end = document.getElementById('end').value;
+    if (!start || !end) {
+      showStatus('err', 'Please select both dates.'); return;
+    }
+    if (start > end) {
+      showStatus('err', 'Start date must be before end date.'); return;
+    }
+    showStatus('loading', 'Importing... this may take 30-60 seconds.');
+    document.getElementById('goBtn').disabled = true;
+
+    google.script.run
+      .withSuccessHandler(function(res) {
+        if (res.success) {
+          var r = res.result;
+          showStatus('ok',
+            'Done. ' + res.startDate + ' to ' + res.endDate + '\n' +
+            'Total: ' + r.total + '  |  Added: ' + r.added + '  |  Skipped: ' + r.skipped + '\n' +
+            'Need PAN: ' + r.needPan + '  |  Have PAN: ' + r.havePan + '  |  Auto-filled: ' + r.autoFilled);
+          document.getElementById('goBtn').textContent = 'Close';
+          document.getElementById('goBtn').onclick = function() { google.script.host.close(); };
+          document.getElementById('goBtn').disabled = false;
+        } else {
+          showStatus('err', res.error);
+          document.getElementById('goBtn').disabled = false;
+        }
+      })
+      .withFailureHandler(function(err) {
+        showStatus('err', err.message || 'Unknown error');
+        document.getElementById('goBtn').disabled = false;
+      })
+      .runImportFromDialog(start, end);
+  }
+
+  function showStatus(type, msg) {
+    var s = document.getElementById('status');
+    s.className = 'status ' + type;
+    s.textContent = msg;
+  }
+</script>
+</body>
+</html>
