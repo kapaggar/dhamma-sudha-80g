@@ -55,7 +55,7 @@ function autoImportMonthly() {
     const adminEmail = Session.getActiveUser().getEmail();
     if (adminEmail) {
       try {
-        GmailApp.sendEmail(adminEmail,
+        MailApp.sendEmail(adminEmail,
           '[80G System] Dana auto-import failed',
           'Error: ' + err.message + '\n\nCheck the Apps Script execution log.\n' +
           'Fallback: 80G Admin > Import from Uploaded XLS File');

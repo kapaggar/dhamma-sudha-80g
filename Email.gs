@@ -60,7 +60,7 @@ function sendPendingEmails() {
     const receiptList = info.receipts.map(r => r.receiptNo).join(',');
 
     try {
-      GmailApp.sendEmail(email,
+      MailApp.sendEmail(email,
         'PAN Details Required for 80G Donation Certificate',
         body, { name: centerName });
 
@@ -135,7 +135,7 @@ function sendReminders() {
     const link = webAppUrl + '?email=' + encodeURIComponent(email) + '&token=' + encodeURIComponent(token);
 
     try {
-      GmailApp.sendEmail(email,
+      MailApp.sendEmail(email,
         'Reminder ' + (count + 1) + '/2: PAN Details for 80G Certificate',
         buildReminderBody_(donorName, link, centerName, count + 1),
         { name: centerName });
