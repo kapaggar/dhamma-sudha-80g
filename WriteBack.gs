@@ -68,83 +68,104 @@ function writeBackPANs_(dryRun) {
     return { processed: 0, succeeded: 0, failed: 0, skipped: 0, total_candidates: 0 };
   }
 
-  const batch = candidates.slice(0, WRITEBACK_MAX_PER_RUN);
-  Logger.log('Writeback: ' + candidates.length + ' eligible, processing ' + batch.length);
-
-  const baseUrl = PropertiesService.getScriptProperties().getProperty('DANA_URL');
-  const user    = PropertiesService.getScriptProperties().getProperty('DANA_USER');
-  const pass    = _readProp('DANA_PASS');
-
-  const sessionCookie = loginToDana_(baseUrl, user, pass, false);
-
-  // For rows missing donation_id, try to look it up from dana now
-  const needLookup = batch.filter(c => !c.donationId);
-  if (needLookup.length > 0) {
-    Logger.log(needLookup.length + ' rows missing donation_id - fetching from dana');
-    const lookedUp = fetchDonationIdsForCandidates_(baseUrl, sessionCookie, needLookup);
-    needLookup.forEach(c => {
-      if (lookedUp[c.receiptNo]) c.donationId = lookedUp[c.receiptNo];
-    });
+  // Serialize real write-backs: a manual "Push Now" and the hourly trigger both
+  // read candidates then write per-row; running them concurrently could double-POST
+  // the same donation_id. Dry-run does no writes, so it stays lock-free.
+  let lock = null;
+  if (!dryRun) {
+    lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(30000);
+    } catch (lockErr) {
+      return {
+        total_candidates: candidates.length,
+        processed: 0, succeeded: 0, failed: 0, skipped: 0,
+        circuit_break: 'Another write-back is already running (could not acquire lock).'
+      };
+    }
   }
 
-  const ss = getSpreadsheet();
-  const sheet = ss.getSheetByName('donors_input');
-  let succeeded = 0, failed = 0, skipped = 0, consec = 0;
-  let circuitBreak = null;
+  try {
+    const batch = candidates.slice(0, WRITEBACK_MAX_PER_RUN);
+    Logger.log('Writeback: ' + candidates.length + ' eligible, processing ' + batch.length);
 
-  for (const c of batch) {
-    if (!c.donationId) {
-      Logger.log('Skip ' + c.receiptNo + ' - no donation_id mapping');
-      skipped++;
-      continue;
+    const baseUrl = PropertiesService.getScriptProperties().getProperty('DANA_URL');
+    const user    = PropertiesService.getScriptProperties().getProperty('DANA_USER');
+    const pass    = _readProp('DANA_PASS');
+
+    const sessionCookie = loginToDana_(baseUrl, user, pass, false);
+
+    // For rows missing donation_id, try to look it up from dana now
+    const needLookup = batch.filter(c => !c.donationId);
+    if (needLookup.length > 0) {
+      Logger.log(needLookup.length + ' rows missing donation_id - fetching from dana');
+      const lookedUp = fetchDonationIdsForCandidates_(baseUrl, sessionCookie, needLookup);
+      needLookup.forEach(c => {
+        if (lookedUp[c.receiptNo]) c.donationId = lookedUp[c.receiptNo];
+      });
     }
 
-    if (dryRun) {
-      Logger.log('[DRY RUN] Would update donation_id=' + c.donationId +
-        ' receipt=' + c.receiptNo +
-        ' (' + c.currentIdType + ' -> PAN ' + maskPAN(c.pan) + ')');
-      succeeded++;
-      consec = 0;
-      continue;
-    }
+    const ss = getSpreadsheet();
+    const sheet = ss.getSheetByName('donors_input');
+    let succeeded = 0, failed = 0, skipped = 0, consec = 0;
+    let circuitBreak = null;
 
-    try {
-      updateDonationSlip_(baseUrl, sessionCookie, c.donationId, c.pan);
+    for (const c of batch) {
+      if (!c.donationId) {
+        Logger.log('Skip ' + c.receiptNo + ' - no donation_id mapping');
+        skipped++;
+        continue;
+      }
 
-      // Mark in sheet: column Y = dana_donation_id, Z = dana_updated_at
-      sheet.getRange(c.rowIndex, 25).setValue(c.donationId);
-      sheet.getRange(c.rowIndex, 26).setValue(new Date().toISOString());
+      if (dryRun) {
+        Logger.log('[DRY RUN] Would update donation_id=' + c.donationId +
+          ' receipt=' + c.receiptNo +
+          ' (' + c.currentIdType + ' -> PAN ' + maskPAN(c.pan) + ')');
+        succeeded++;
+        consec = 0;
+        continue;
+      }
 
-      auditLog(ss, 'writeBack', 'dana_updated',
-        c.receiptNo, 'd_id_type+d_id_no',
-        c.currentIdType + ':' + (c.currentIdValue || ''),
-        'PAN:' + maskPAN(c.pan),
-        c.donationId);
+      try {
+        updateDonationSlip_(baseUrl, sessionCookie, c.donationId, c.pan);
 
-      succeeded++;
-      consec = 0;
-      // Small delay to avoid hammering the dana server
-      Utilities.sleep(800);
-    } catch (err) {
-      Logger.log('Update FAILED for ' + c.receiptNo + ' (donation_id=' + c.donationId + '): ' + err.message);
-      auditLog(ss, 'writeBack', 'dana_update_failed',
-        c.receiptNo, '', '', err.message.substring(0, 200), c.donationId);
-      failed++;
-      consec++;
-      if (consec >= WRITEBACK_MAX_CONSECUTIVE_ERRORS) {
-        circuitBreak = consec + ' consecutive failures - stopping';
-        Logger.log(circuitBreak);
-        break;
+        // Mark in sheet: column Y = dana_donation_id, Z = dana_updated_at
+        sheet.getRange(c.rowIndex, 25).setValue(c.donationId);
+        sheet.getRange(c.rowIndex, 26).setValue(new Date().toISOString());
+
+        auditLog(ss, 'writeBack', 'dana_updated',
+          c.receiptNo, 'd_id_type+d_id_no',
+          c.currentIdType + ':' + (c.currentIdValue || ''),
+          'PAN:' + maskPAN(c.pan),
+          c.donationId);
+
+        succeeded++;
+        consec = 0;
+        // Small delay to avoid hammering the dana server
+        Utilities.sleep(800);
+      } catch (err) {
+        Logger.log('Update FAILED for ' + c.receiptNo + ' (donation_id=' + c.donationId + '): ' + err.message);
+        auditLog(ss, 'writeBack', 'dana_update_failed',
+          c.receiptNo, '', '', err.message.substring(0, 200), c.donationId);
+        failed++;
+        consec++;
+        if (consec >= WRITEBACK_MAX_CONSECUTIVE_ERRORS) {
+          circuitBreak = consec + ' consecutive failures - stopping';
+          Logger.log(circuitBreak);
+          break;
+        }
       }
     }
-  }
 
-  return {
-    total_candidates: candidates.length,
-    processed: succeeded + failed + skipped,
-    succeeded, failed, skipped,
-    circuit_break: circuitBreak
-  };
+    return {
+      total_candidates: candidates.length,
+      processed: succeeded + failed + skipped,
+      succeeded, failed, skipped,
+      circuit_break: circuitBreak
+    };
+  } finally {
+    if (lock) lock.releaseLock();
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -410,8 +410,12 @@ function extractCookies_(response, priorCookieHeader) {
   const cookieMap = {};
   if (priorCookieHeader) {
     priorCookieHeader.split(';').forEach(c => {
-      const [k, v] = c.trim().split('=');
-      if (k && v !== undefined) cookieMap[k] = v;
+      // Split on the FIRST '=' only. A naive split('=') truncates values that
+      // legitimately contain '=' (e.g. Cloudflare __cf_bm / cf_clearance, base64
+      // padding), corrupting the session/clearance cookie on subsequent requests.
+      const s = c.trim();
+      const i = s.indexOf('=');
+      if (i > 0) cookieMap[s.substring(0, i)] = s.substring(i + 1);
     });
   }
   setCookies.forEach(sc => {

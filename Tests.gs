@@ -61,18 +61,8 @@ function testConsentRequired() {
   Logger.log('consent=false: ' + JSON.stringify(result));
 }
 
-function testDanaImportLogin() {
-  // Manual test - verifies dana login works without full import
-  try {
-    const props = PropertiesService.getScriptProperties();
-    const cookie = loginToDana_(
-      props.getProperty('DANA_URL'),
-      props.getProperty('DANA_USER'),
-      props.getProperty('DANA_PASS')
-    );
-    Logger.log('Login OK. Cookie length: ' + cookie.length);
-    Logger.log('Cookie names: ' + cookie.split(';').map(c => c.trim().split('=')[0]).join(', '));
-  } catch (err) {
-    Logger.log('Login failed: ' + err.message);
-  }
-}
+// NOTE: testDanaImportLogin() lives in DanaImport.gs (verbose, decodes DANA_PASS
+// via _readProp). A duplicate previously defined here passed the raw base64
+// DANA_PASS straight to loginToDana_ and, because .gs files share one global
+// scope, could shadow the real one and make the login self-test fail even with
+// correct credentials. Do not re-add it here.

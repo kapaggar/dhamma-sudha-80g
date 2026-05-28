@@ -120,62 +120,75 @@ function submitForm(data) {
   if (!r.valid) return { success: false, error: r.error };
   const pan = r.pan;
 
-  const ss = getSpreadsheet();
-  const donorsSheet = ss.getSheetByName('donors_input');
-  if (!donorsSheet || donorsSheet.getLastRow() < 2) {
-    return { success: false, error: 'No records found.' };
+  // Serialize concurrent submissions (double-click, two tabs, repeat donor) so the
+  // read-modify-write of donors_input + submissions cannot interleave.
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+  } catch (lockErr) {
+    return { success: false, error: 'The system is busy. Please try again in a moment.' };
   }
 
-  const emailLower = data.email.toLowerCase().trim();
-  const allData = donorsSheet.getDataRange().getValues();
-  const now = new Date().toISOString();
-  const updatedReceipts = [];
-  let donorName = '';
-  let donorMobile = '';
+  try {
+    const ss = getSpreadsheet();
+    const donorsSheet = ss.getSheetByName('donors_input');
+    if (!donorsSheet || donorsSheet.getLastRow() < 2) {
+      return { success: false, error: 'No records found.' };
+    }
 
-  // Update all need_pan rows for this email; pan_name = existing full_name on file
-  for (let i = 1; i < allData.length; i++) {
-    const row = allData[i];
-    if ((row[4] || '').toString().toLowerCase().trim() !== emailLower) continue;
-    if (!donorName && row[3]) donorName = row[3];
-    if (!donorMobile && row[5]) donorMobile = row[5];
+    const emailLower = data.email.toLowerCase().trim();
+    const allData = donorsSheet.getDataRange().getValues();
+    const now = new Date().toISOString();
+    const updatedReceipts = [];
+    let donorName = '';
+    let donorMobile = '';
 
-    if (row[20] !== 'need_pan') continue;
-    const rowNum = i + 1;
-    donorsSheet.getRange(rowNum, 19).setValue(pan);                          // S pan_collected
-    donorsSheet.getRange(rowNum, 20).setValue(donorName.toUpperCase());      // T pan_name (from existing record)
-    donorsSheet.getRange(rowNum, 21).setValue('have_pan');                   // U pan_status
-    donorsSheet.getRange(rowNum, 24).setValue(now);                          // X pan_submitted_at
-    updatedReceipts.push(row[0]);
-  }
+    // Update all need_pan rows for this email; pan_name = existing full_name on file
+    for (let i = 1; i < allData.length; i++) {
+      const row = allData[i];
+      if ((row[4] || '').toString().toLowerCase().trim() !== emailLower) continue;
+      if (!donorName && row[3]) donorName = row[3];
+      if (!donorMobile && row[5]) donorMobile = row[5];
 
-  if (updatedReceipts.length === 0) {
-    return { success: false, error: 'No pending PAN requests found. You may have already submitted.' };
-  }
+      if (row[20] !== 'need_pan') continue;
+      const rowNum = i + 1;
+      donorsSheet.getRange(rowNum, 19).setValue(pan);                          // S pan_collected
+      donorsSheet.getRange(rowNum, 20).setValue(donorName.toUpperCase());      // T pan_name (from existing record)
+      donorsSheet.getRange(rowNum, 21).setValue('have_pan');                   // U pan_status
+      donorsSheet.getRange(rowNum, 24).setValue(now);                          // X pan_submitted_at
+      updatedReceipts.push(row[0]);
+    }
 
-  const subSheet = ss.getSheetByName('submissions');
-  const subId = Utilities.getUuid();
-  subSheet.appendRow([
-    subId, emailLower, donorMobile, pan, donorName.toUpperCase(),
-    updatedReceipts.join(','), updatedReceipts.length,
-    now, data.token, now, now, ''
-  ]);
+    if (updatedReceipts.length === 0) {
+      return { success: false, error: 'No pending PAN requests found. You may have already submitted.' };
+    }
 
-  auditLog(ss, 'form_submit', 'pan_collected',
-    emailLower, 'pan', '', maskPAN(pan), subId);
+    const subSheet = ss.getSheetByName('submissions');
+    const subId = Utilities.getUuid();
+    subSheet.appendRow([
+      subId, emailLower, donorMobile, pan, donorName.toUpperCase(),
+      updatedReceipts.join(','), updatedReceipts.length,
+      now, data.token, now, now, ''
+    ]);
 
-  const logSheet = ss.getSheetByName('email_log');
-  if (logSheet && logSheet.getLastRow() > 1) {
-    const logData = logSheet.getDataRange().getValues();
-    for (let i = 1; i < logData.length; i++) {
-      if ((logData[i][0] || '').toString().toLowerCase().trim() === emailLower && !logData[i][5]) {
-        logSheet.getRange(i + 1, 6).setValue(now); // submitted_at
-        break;
+    auditLog(ss, 'form_submit', 'pan_collected',
+      emailLower, 'pan', '', maskPAN(pan), subId);
+
+    const logSheet = ss.getSheetByName('email_log');
+    if (logSheet && logSheet.getLastRow() > 1) {
+      const logData = logSheet.getDataRange().getValues();
+      for (let i = 1; i < logData.length; i++) {
+        if ((logData[i][0] || '').toString().toLowerCase().trim() === emailLower && !logData[i][5]) {
+          logSheet.getRange(i + 1, 6).setValue(now); // submitted_at
+          break;
+        }
       }
     }
-  }
 
-  return { success: true, count: updatedReceipts.length };
+    return { success: true, count: updatedReceipts.length };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // ---------------------------------------------------------------------------
