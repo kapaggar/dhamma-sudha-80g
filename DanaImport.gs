@@ -61,7 +61,7 @@ function autoImportMonthly() {
     const result = runDanaImport_(range.start, range.end);
     Logger.log('autoImportMonthly: ' + JSON.stringify(result));
     if (result.added > 0 && result.needPan > 0) {
-      sendPendingEmails();
+      sendPendingEmails(true);
     }
   } catch (err) {
     Logger.log('autoImportMonthly failed: ' + err.message);

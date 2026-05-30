@@ -1,11 +1,28 @@
 // Email.gs
 
-function sendPendingEmails() {
+// --- Email send throttling -------------------------------------------------
+// Google enforces a DAILY email quota from Apps Script (~100 recipients/day on
+// consumer Gmail, ~1500/day on Workspace). It is a DAILY cap, not hourly - pacing
+// per hour does NOT raise the ceiling. We cap per run, and refuse to spend the last
+// EMAIL_QUOTA_BUFFER of the live remaining quota (read via getRemainingDailyQuota).
+// Run hourly (80G Admin > 2. Email Donors > Enable Hourly Email Sending) to drain a
+// large backlog safely; it resumes automatically after the quota resets each day.
+// Override the per-run cap with a Script Property "EMAIL_MAX_PER_RUN".
+const EMAIL_MAX_PER_RUN_DEFAULT = 10;  // emails per invocation
+const EMAIL_QUOTA_BUFFER = 5;          // keep this many of the daily quota in reserve
+const EMAIL_SEND_SLEEP_MS = 1000;      // gentle pause between sends
+
+function getEmailMaxPerRun_() {
+  const v = parseInt(PropertiesService.getScriptProperties().getProperty('EMAIL_MAX_PER_RUN'), 10);
+  return (!isNaN(v) && v > 0) ? v : EMAIL_MAX_PER_RUN_DEFAULT;
+}
+
+function sendPendingEmails(silent) {
   const ss = getSpreadsheet();
   const donorsSheet = ss.getSheetByName('donors_input');
   if (!donorsSheet || donorsSheet.getLastRow() < 2) {
-    try { SpreadsheetApp.getUi().alert('No donor records.'); } catch (_) {}
-    return;
+    if (!silent) { try { SpreadsheetApp.getUi().alert('No donor records.'); } catch (_) {} }
+    return { sent: 0, skipped: 0, failed: 0, pending: 0, remainingQuota: null };
   }
 
   const webAppUrl = PropertiesService.getScriptProperties().getProperty('WEB_APP_URL');
@@ -17,17 +34,20 @@ function sendPendingEmails() {
     'email_status', 'reminder_count', 'submitted_at', 'last_reminder_at'
   ]);
 
+  // (a) emails already sent (skip), and (b) email -> existing log row number, so a
+  // previously-failed row is UPDATED in place rather than appended. Appending caused
+  // duplicate email_log rows, which in turn caused duplicate reminders.
   const sentEmails = new Set();
+  const logRowByEmail = {};
   if (logSheet.getLastRow() > 1) {
-    // Read email + email_status (cols A..D). Only rows that actually SENT count as
-    // "already emailed"; rows logged "failed: ..." must remain eligible for retry.
     const logData = logSheet.getRange(2, 1, logSheet.getLastRow() - 1, 4).getValues();
-    logData.forEach(r => {
-      const status = (r[3] || '').toString().toLowerCase();
-      if (r[0] && status.indexOf('sent') === 0) {
-        sentEmails.add(r[0].toString().toLowerCase().trim());
-      }
-    });
+    for (let i = 0; i < logData.length; i++) {
+      const e = (logData[i][0] || '').toString().toLowerCase().trim();
+      if (!e) continue;
+      logRowByEmail[e] = i + 2; // sheet row number
+      const status = (logData[i][3] || '').toString().toLowerCase();
+      if (status.indexOf('sent') === 0) sentEmails.add(e);
+    }
   }
 
   const data = donorsSheet.getDataRange().getValues();
@@ -37,24 +57,33 @@ function sendPendingEmails() {
     const email = (row[4] || '').toString().toLowerCase().trim();
     if (!email) continue;
     if (row[20] !== 'need_pan') continue;
-
-    if (!byEmail[email]) {
-      byEmail[email] = { name: row[3] || '', receipts: [] };
-    }
+    if (!byEmail[email]) byEmail[email] = { name: row[3] || '', receipts: [] };
     byEmail[email].receipts.push({
       receiptNo: row[0], amount: row[14], txnDate: row[1], course: row[10]
     });
   }
 
-  let sent = 0, skipped = 0, failed = 0;
+  // Eligible = need_pan emails not already sent. Sorted for deterministic ordering
+  // across hourly runs so the backlog drains predictably.
+  const eligible = Object.keys(byEmail).filter(e => !sentEmails.has(e)).sort();
 
-  for (const email in byEmail) {
-    if (sentEmails.has(email)) { skipped++; continue; }
+  const maxPerRun = getEmailMaxPerRun_();
+  let remaining;
+  try { remaining = MailApp.getRemainingDailyQuota(); }
+  catch (_) { remaining = maxPerRun; } // if quota lookup unavailable, fall back to cap
+
+  let sent = 0, failed = 0;
+  let stopReason = '';
+
+  for (const email of eligible) {
+    if (sent >= maxPerRun) { stopReason = 'per-run cap (' + maxPerRun + ') reached'; break; }
+    if (remaining - EMAIL_QUOTA_BUFFER <= 0) { stopReason = 'daily email quota nearly exhausted'; break; }
 
     const info = byEmail[email];
     const token = generateToken(email);
     const link = webAppUrl + '?email=' + encodeURIComponent(email) + '&token=' + encodeURIComponent(token);
     const receiptList = info.receipts.map(r => r.receiptNo).join(',');
+    const nowIso = new Date().toISOString();
 
     try {
       MailApp.sendEmail({
@@ -64,22 +93,54 @@ function sendPendingEmails() {
         body: buildInitialPlainText_(info.name, info.receipts, link, centerName),
         name: centerName
       });
-      logSheet.appendRow([email, receiptList, new Date().toISOString(), 'sent', 0, '', '']);
+      writeEmailLogRow_(logSheet, logRowByEmail, email, receiptList, nowIso, 'sent');
       auditLog(ss, 'sendPendingEmails', 'email_sent', email, 'initial', '', 'sent', '');
       sent++;
+      remaining--;
+      Utilities.sleep(EMAIL_SEND_SLEEP_MS);
     } catch (err) {
       Logger.log('Email failed ' + email + ': ' + err.message);
-      logSheet.appendRow([email, receiptList, new Date().toISOString(), 'failed: ' + err.message, 0, '', '']);
+      writeEmailLogRow_(logSheet, logRowByEmail, email, receiptList, nowIso, 'failed: ' + err.message);
       failed++;
+      // A quota error mid-run means every later send will also fail - stop now.
+      if (/too many times|quota|limit/i.test(err.message)) { stopReason = 'daily email quota reached'; break; }
     }
   }
 
-  try {
-    SpreadsheetApp.getUi().alert(
-      'Sent:    ' + sent + '\n' +
-      'Skipped: ' + skipped + ' (already emailed)\n' +
-      'Failed:  ' + failed);
-  } catch (_) {}
+  const pending = eligible.length - sent; // not-yet-sent this run (includes any failed)
+
+  if (!silent) {
+    try {
+      SpreadsheetApp.getUi().alert(
+        'Sent:             ' + sent + '\n' +
+        'Failed:           ' + failed + '\n' +
+        'Still pending:    ' + pending + '\n' +
+        'Quota left today: ' + remaining +
+        (stopReason ? '\n\nStopped: ' + stopReason : '') +
+        (pending > 0 ? '\n\nTip: 2. Email Donors > Enable Hourly Email Sending drains the backlog automatically.' : ''));
+    } catch (_) {}
+  }
+
+  return {
+    sent: sent, skipped: sentEmails.size, failed: failed,
+    pending: pending, remainingQuota: remaining, stopReason: stopReason
+  };
+}
+
+// Update an existing email_log row for this email if present, else append one.
+// Keeps exactly one row per email so failed -> sent transitions cleanly and
+// reminder bookkeeping stays single-row.
+function writeEmailLogRow_(logSheet, logRowByEmail, email, receiptList, nowIso, status) {
+  const existing = logRowByEmail[email];
+  if (existing) {
+    logSheet.getRange(existing, 2).setValue(receiptList);
+    logSheet.getRange(existing, 3).setValue(nowIso);
+    logSheet.getRange(existing, 4).setValue(status);
+    // leave reminder_count (5), submitted_at (6), last_reminder_at (7) untouched
+  } else {
+    logSheet.appendRow([email, receiptList, nowIso, status, 0, '', '']);
+    logRowByEmail[email] = logSheet.getLastRow();
+  }
 }
 
 function sendReminders() {
@@ -110,6 +171,10 @@ function sendReminders() {
     }
   }
 
+  const maxPerRun = getEmailMaxPerRun_();
+  let remaining;
+  try { remaining = MailApp.getRemainingDailyQuota(); } catch (_) { remaining = maxPerRun; }
+
   let sent = 0;
   for (let i = 1; i < logData.length; i++) {
     const [email, , sentAt, , reminderCount, submittedAt, lastReminderAt] = logData[i];
@@ -124,6 +189,10 @@ function sendReminders() {
     const daysSince = (now - lastContact) / 86400000;
     const threshold = count === 0 ? 3 : 7;
     if (daysSince < threshold) continue;
+
+    // Respect the same per-run cap and daily-quota buffer as initial sends.
+    if (sent >= maxPerRun) break;
+    if (remaining - EMAIL_QUOTA_BUFFER <= 0) break;
 
     const donorName = nameByEmail[email] || 'Donor';
     const token = generateToken(email);
@@ -142,8 +211,11 @@ function sendReminders() {
       logSheet.getRange(i + 1, 7).setValue(now.toISOString());
       auditLog(ss, 'sendReminders', 'reminder_sent', email, 'reminder_count', count, num, '');
       sent++;
+      remaining--;
+      Utilities.sleep(EMAIL_SEND_SLEEP_MS);
     } catch (err) {
       Logger.log('Reminder failed ' + email + ': ' + err.message);
+      if (/too many times|quota|limit/i.test(err.message)) break;
     }
   }
 
@@ -259,4 +331,52 @@ function escapeHtml_(s) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// ---------------------------------------------------------------------------
+// Hourly email-sending trigger (drains a large backlog within the daily quota)
+// ---------------------------------------------------------------------------
+
+function autoSendEmailsHourly() {
+  try {
+    const r = sendPendingEmails(true);
+    Logger.log('autoSendEmailsHourly: ' + JSON.stringify(r));
+  } catch (err) {
+    Logger.log('autoSendEmailsHourly failed: ' + err.message);
+    try {
+      const adminEmail = Session.getActiveUser().getEmail();
+      if (adminEmail) {
+        MailApp.sendEmail(adminEmail,
+          '[80G System] Hourly email sending failed',
+          'Error: ' + err.message + '\n\nCheck the Apps Script execution log.');
+      }
+    } catch (_) {}
+  }
+}
+
+function installHourlyEmailTrigger() {
+  const triggers = ScriptApp.getProjectTriggers();
+  let removed = 0;
+  triggers.forEach(t => {
+    if (t.getHandlerFunction() === 'autoSendEmailsHourly') {
+      ScriptApp.deleteTrigger(t); removed++;
+    }
+  });
+  ScriptApp.newTrigger('autoSendEmailsHourly').timeBased().everyHours(1).create();
+  SpreadsheetApp.getUi().alert(
+    'Hourly email sending enabled.\n\n' +
+    'Removed: ' + removed + ' existing trigger(s).\n' +
+    'Up to ' + getEmailMaxPerRun_() + ' emails will be sent each hour, within the daily ' +
+    'quota. To stop, use "Disable Hourly Email Sending".');
+}
+
+function disableHourlyEmailTrigger() {
+  const triggers = ScriptApp.getProjectTriggers();
+  let removed = 0;
+  triggers.forEach(t => {
+    if (t.getHandlerFunction() === 'autoSendEmailsHourly') {
+      ScriptApp.deleteTrigger(t); removed++;
+    }
+  });
+  SpreadsheetApp.getUi().alert('Removed ' + removed + ' hourly email trigger(s).');
 }

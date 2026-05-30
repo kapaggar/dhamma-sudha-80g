@@ -11,7 +11,10 @@ function onOpen() {
       .addItem('Import from Uploaded XLS File', 'importFromUploadedFile'))
     .addSubMenu(ui.createMenu('2. Email Donors')
       .addItem('Send PAN Request Emails', 'sendPendingEmails')
-      .addItem('Send Reminders (3d/7d)', 'sendReminders'))
+      .addItem('Send Reminders (3d/7d)', 'sendReminders')
+      .addSeparator()
+      .addItem('Enable Hourly Email Sending', 'installHourlyEmailTrigger')
+      .addItem('Disable Hourly Email Sending', 'disableHourlyEmailTrigger'))
     .addSubMenu(ui.createMenu('3. Push PAN to Dana')
       .addItem('Preview (dry run)', 'previewWriteBackToDana')
       .addItem('Push Now', 'pushPANsToDana')
@@ -40,8 +43,13 @@ function refreshAdminReview() {
     'receipt_no', 'txn_date', 'full_name', 'email', 'amount',
     'pan_masked', 'pan_source', 'pan_status', 'days_since_import', 'category'
   ]);
-  if (adminSheet.getLastRow() > 1) {
-    adminSheet.deleteRows(2, adminSheet.getLastRow() - 1);
+  // Clear prior rows below the header. Using clear() instead of deleteRows():
+  // deleteRows throws "it is not possible to delete all non-frozen rows" when the
+  // grid has no spare rows beneath the data (frozen header + exact-fit grid). clear()
+  // also removes the per-row background colors from the previous refresh.
+  const arMaxRows = adminSheet.getMaxRows();
+  if (arMaxRows > 1) {
+    adminSheet.getRange(2, 1, arMaxRows - 1, adminSheet.getMaxColumns()).clear();
   }
 
   const data = donorsSheet.getDataRange().getValues();
@@ -127,8 +135,10 @@ function exportReadyFor80G() {
     'course', 'category', 'payment_mode', 'amount', 'merchant_ref',
     'pan', 'pan_name', 'pan_source', 'exported_at'
   ]);
-  if (expSheet.getLastRow() > 1) {
-    expSheet.deleteRows(2, expSheet.getLastRow() - 1);
+  // Same fix as admin_review: clear below the header rather than deleteRows.
+  const expMaxRows = expSheet.getMaxRows();
+  if (expMaxRows > 1) {
+    expSheet.getRange(2, 1, expMaxRows - 1, expSheet.getMaxColumns()).clear();
   }
 
   const data = donorsSheet.getDataRange().getValues();

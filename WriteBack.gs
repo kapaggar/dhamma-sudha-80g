@@ -280,15 +280,36 @@ function fetchDonationIdsForCandidates_(baseUrl, sessionCookie, candidates) {
 // ---------------------------------------------------------------------------
 
 function updateDonationSlip_(baseUrl, sessionCookie, donationId, newPan) {
+  // The edit is idempotent (we always set the same d_id_type/d_id_no), so a fresh
+  // GET+POST retry is safe. Retry once on a transient 5xx - Drupal DB deadlock / OOM
+  // surface as HTTP 500 (this is what ER0010472 / donation_id 10555 hit). A 4xx or a
+  // 200 re-render is a real rejection and is NOT retried; it is surfaced with a
+  // sanitized snippet of dana's response so the audit_log is diagnostic.
+  let last;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    last = postDonationEdit_(baseUrl, sessionCookie, donationId, newPan);
+    if (last.code === 302) return;
+
+    const snippet = sanitizeDanaError_(last.body);
+    Logger.log('Edit POST HTTP ' + last.code + ' (attempt ' + attempt + '/2) donation_id=' +
+      donationId + (snippet ? ' :: ' + snippet : ''));
+
+    if (last.code >= 500 && attempt < 2) {
+      Utilities.sleep(1500);
+      continue;
+    }
+    throw new Error('Edit POST HTTP ' + last.code + ' (expected 302 redirect)' +
+      (snippet ? ' - ' + snippet : ''));
+  }
+}
+
+// One GET (read current field values) + one POST (submit the PAN edit).
+// Returns { code, body }; throws only if the GET or token extraction fails.
+function postDonationEdit_(baseUrl, sessionCookie, donationId, newPan) {
   const editUrl = baseUrl + '/donation/edit/' + donationId;
 
-  // GET current form
   const getResp = UrlFetchApp.fetch(editUrl, {
-    headers: {
-      Cookie: sessionCookie,
-      'User-Agent': DANA_USER_AGENT,
-      'Accept': 'text/html'
-    },
+    headers: { Cookie: sessionCookie, 'User-Agent': DANA_USER_AGENT, 'Accept': 'text/html' },
     muteHttpExceptions: true
   });
   if (getResp.getResponseCode() !== 200) {
@@ -297,7 +318,6 @@ function updateDonationSlip_(baseUrl, sessionCookie, donationId, newPan) {
   const html = getResp.getContentText();
   const cookie2 = extractCookies_(getResp, sessionCookie);
 
-  // Extract all current form values
   const values = extractFormValues_(html);
   if (!values.form_build_id || !values.form_token) {
     throw new Error('Could not extract form tokens from edit page');
@@ -308,30 +328,33 @@ function updateDonationSlip_(baseUrl, sessionCookie, donationId, newPan) {
   values.d_id_no = newPan;
   values.form_id = 'donation_main_form';
 
-  // Do NOT trigger another email/whatsapp confirmation to the donor
-  // (they already got their original receipt; we're just changing the ID type)
+  // Do NOT trigger another email/whatsapp confirmation to the donor.
+  // NOTE (B6): assumes dana's notification toggles are named email/whatsapp and are
+  // NOT the donor contact fields. Verify on a live edit form before a large batch -
+  // posting email=0 to a contact field would corrupt donor data in the source.
   values.email = '0';
   values.whatsapp = '0';
 
-  // POST the edit
   const postResp = UrlFetchApp.fetch(editUrl, {
     method: 'post',
     payload: values,
-    headers: {
-      Cookie: cookie2,
-      'User-Agent': DANA_USER_AGENT,
-      'Referer': editUrl
-    },
+    headers: { Cookie: cookie2, 'User-Agent': DANA_USER_AGENT, 'Referer': editUrl },
     followRedirects: false,
     muteHttpExceptions: true
   });
+  return { code: postResp.getResponseCode(), body: postResp.getContentText() };
+}
 
-  const code = postResp.getResponseCode();
-  if (code !== 302) {
-    Logger.log('Edit POST HTTP ' + code);
-    Logger.log('Body: ' + postResp.getContentText().substring(0, 500));
-    throw new Error('Edit POST HTTP ' + code + ' (expected 302 redirect)');
-  }
+// Strip a dana HTML error page down to a short, log-safe, single-line snippet.
+function sanitizeDanaError_(html) {
+  if (!html) return '';
+  return html.toString()
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .substring(0, 160);
 }
 
 // ---------------------------------------------------------------------------
