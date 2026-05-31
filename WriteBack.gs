@@ -146,7 +146,7 @@ function writeBackPANs_(dryRun) {
       } catch (err) {
         Logger.log('Update FAILED for ' + c.receiptNo + ' (donation_id=' + c.donationId + '): ' + err.message);
         auditLog(ss, 'writeBack', 'dana_update_failed',
-          c.receiptNo, '', '', err.message.substring(0, 200), c.donationId);
+          c.receiptNo, '', '', err.message.substring(0, 400), c.donationId);
         failed++;
         consec++;
         if (consec >= WRITEBACK_MAX_CONSECUTIVE_ERRORS) {
@@ -346,15 +346,29 @@ function postDonationEdit_(baseUrl, sessionCookie, donationId, newPan) {
 }
 
 // Strip a dana HTML error page down to a short, log-safe, single-line snippet.
+// Drupal 7 renders unhandled exceptions as a boilerplate page; the useful part
+// (PDOException: SQLSTATE[...] + offending column/constraint) appears AFTER the
+// "Error message" label. We start there so a short snippet still carries the
+// diagnostic payload, and we redact PAN-shaped tokens - a duplicate-key DB error
+// echoes the raw value, which would otherwise leak NPI into audit_log.
 function sanitizeDanaError_(html) {
   if (!html) return '';
-  return html.toString()
+  let text = html.toString()
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
-    .trim()
-    .substring(0, 160);
+    .trim();
+  // Jump to Drupal's "Error message" label if present (the real PDO text follows it).
+  const idx = text.search(/Error message/i);
+  if (idx >= 0) text = text.substring(idx + 'Error message'.length).trim();
+  return maskPanInText_(text).substring(0, 300);
+}
+
+// Redact any PAN-shaped token ([A-Z]{5}[0-9]{4}[A-Z]) from free text before logging.
+function maskPanInText_(s) {
+  if (!s) return '';
+  return s.toString().replace(/\b[A-Za-z]{5}\d{4}[A-Za-z]\b/g, 'PAN_REDACTED');
 }
 
 // ---------------------------------------------------------------------------
@@ -450,4 +464,88 @@ function disableHourlyTrigger() {
     }
   });
   SpreadsheetApp.getUi().alert('Removed ' + removed + ' auto-push trigger(s).');
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics: dump the edit-form field set for one donation_id
+// ---------------------------------------------------------------------------
+// Root-causes record-specific write-back failures (e.g. HTTP 500 / PDOException).
+// GET-only by default: logs every field name+value we WOULD POST, flags blanks and
+// unselected <select>s (the usual cause - an omitted/blank field hits a NOT NULL or
+// typed DB column on save). PAN-shaped values are masked. No sheet writes.
+// Pass doPost=true to also attempt the POST and capture dana's full response
+// (still masked, still no sheet write) when you need the exact SQLSTATE/column.
+function diagnoseDanaWriteBack(donationId, doPost) {
+  const baseUrl = PropertiesService.getScriptProperties().getProperty('DANA_URL');
+  const user    = PropertiesService.getScriptProperties().getProperty('DANA_USER');
+  const pass    = _readProp('DANA_PASS');
+  const cookie  = loginToDana_(baseUrl, user, pass, false);
+
+  const editUrl = baseUrl + '/donation/edit/' + donationId;
+  const getResp = UrlFetchApp.fetch(editUrl, {
+    headers: { Cookie: cookie, 'User-Agent': DANA_USER_AGENT, 'Accept': 'text/html' },
+    muteHttpExceptions: true
+  });
+  Logger.log('GET ' + editUrl + ' -> HTTP ' + getResp.getResponseCode());
+  if (getResp.getResponseCode() !== 200) {
+    Logger.log('Body: ' + sanitizeDanaError_(getResp.getContentText()));
+    return { ok: false, stage: 'get', code: getResp.getResponseCode() };
+  }
+
+  const html = getResp.getContentText();
+  const values = extractFormValues_(html);
+  const names = Object.keys(values);
+  Logger.log('Extracted ' + names.length + ' fields:');
+  const blanks = [];
+  names.sort().forEach(n => {
+    const raw = (values[n] == null) ? '' : values[n].toString();
+    const shown = maskPanInText_(raw).substring(0, 80);
+    if (raw === '') blanks.push(n);
+    Logger.log('  ' + n + ' = ' + (raw === '' ? '(EMPTY)' : '"' + shown + '"'));
+  });
+
+  // Flag <select>s present in the HTML but with no value extracted (no selected
+  // option) - these get dropped from the POST and are the prime PDOException suspect.
+  const selectNames = [];
+  const selRe = /<select\b[^>]*\bname="([^"]+)"/gi;
+  let sm;
+  while ((sm = selRe.exec(html)) !== null) selectNames.push(sm[1]);
+  const unselected = selectNames.filter(n => !(n in values) || values[n] === '');
+  if (unselected.length) Logger.log('SELECTS WITH NO SELECTED OPTION (dropped from POST): ' + unselected.join(', '));
+  if (blanks.length)     Logger.log('EMPTY FIELDS (submitted as ""): ' + blanks.join(', '));
+
+  let post = null;
+  if (doPost) {
+    // Mirror the real write-back overrides, but DO NOT touch the sheet.
+    const probe = postDonationEdit_(baseUrl, cookie, donationId, 'ABCDE1234F'); // dummy PAN, redacted in logs
+    post = { code: probe.code, body: sanitizeDanaError_(probe.body) };
+    Logger.log('POST probe -> HTTP ' + probe.code + ' :: ' + post.body);
+    Logger.log('NOTE: probe used a DUMMY PAN and did not update the sheet. Re-run a real push to persist.');
+  }
+
+  return {
+    ok: true, donationId: donationId, fieldCount: names.length,
+    unselectedSelects: unselected, emptyFields: blanks, post: post
+  };
+}
+
+// Menu wrapper: prompt for a donation_id and run the GET-only field dump.
+function promptDiagnoseDanaWriteBack() {
+  const ui = SpreadsheetApp.getUi();
+  const resp = ui.prompt('Diagnose write-back',
+    'Enter the dana donation_id to inspect (e.g. 10592). Field values are logged to the Apps Script execution log; PAN is masked. No data is written.',
+    ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const id = resp.getResponseText().trim();
+  if (!/^\d+$/.test(id)) { ui.alert('Not a valid numeric donation_id.'); return; }
+  try {
+    const r = diagnoseDanaWriteBack(id, false);
+    ui.alert('Diagnosis complete for donation_id ' + id + '.\n\n' +
+      'Fields: ' + r.fieldCount + '\n' +
+      'Unselected selects: ' + (r.unselectedSelects.length ? r.unselectedSelects.join(', ') : 'none') + '\n' +
+      'Empty fields: ' + (r.emptyFields.length ? r.emptyFields.join(', ') : 'none') + '\n\n' +
+      'See View > Execution log for the full field dump.');
+  } catch (err) {
+    ui.alert('Diagnosis failed: ' + err.message);
+  }
 }

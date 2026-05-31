@@ -93,8 +93,13 @@ function sendPendingEmails(silent) {
         body: buildInitialPlainText_(info.name, info.receipts, link, centerName),
         name: centerName
       });
-      writeEmailLogRow_(logSheet, logRowByEmail, email, receiptList, nowIso, 'sent');
+      // Write the durable audit row FIRST. email_log is the operational state that
+      // gates future sends/reminders; audit_log is the immutable record. If the run
+      // dies between the two writes, we must fail toward "audit has it, email_log
+      // doesn't" (-> the email is retried, donor still gets it) rather than
+      // "email_log says sent, audit missing" (-> silent gap, donor may be skipped).
       auditLog(ss, 'sendPendingEmails', 'email_sent', email, 'initial', '', 'sent', '');
+      writeEmailLogRow_(logSheet, logRowByEmail, email, receiptList, nowIso, 'sent');
       sent++;
       remaining--;
       Utilities.sleep(EMAIL_SEND_SLEEP_MS);
@@ -132,13 +137,22 @@ function sendPendingEmails(silent) {
 // reminder bookkeeping stays single-row.
 function writeEmailLogRow_(logSheet, logRowByEmail, email, receiptList, nowIso, status) {
   const existing = logRowByEmail[email];
+  const isSent = status === 'sent';
   if (existing) {
     logSheet.getRange(existing, 2).setValue(receiptList);
-    logSheet.getRange(existing, 3).setValue(nowIso);
     logSheet.getRange(existing, 4).setValue(status);
+    // sent_at (col 3) anchors the reminder schedule. Only stamp it on the FIRST
+    // successful send; never advance it on a retry or a repeated failure, or
+    // reminders would keep resetting their 3d/7d clock and never mature.
+    if (isSent) {
+      const cur = logSheet.getRange(existing, 3).getValue();
+      if (!cur) logSheet.getRange(existing, 3).setValue(nowIso);
+    }
     // leave reminder_count (5), submitted_at (6), last_reminder_at (7) untouched
   } else {
-    logSheet.appendRow([email, receiptList, nowIso, status, 0, '', '']);
+    // New row: stamp sent_at only if this first record is a success; a first-time
+    // failure leaves sent_at empty so the eventual success sets the clock.
+    logSheet.appendRow([email, receiptList, isSent ? nowIso : '', status, 0, '', '']);
     logRowByEmail[email] = logSheet.getLastRow();
   }
 }
@@ -379,4 +393,71 @@ function disableHourlyEmailTrigger() {
     }
   });
   SpreadsheetApp.getUi().alert('Removed ' + removed + ' hourly email trigger(s).');
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile email_log against audit_log
+// ---------------------------------------------------------------------------
+// Detects rows where the two logs disagree about whether an email was sent:
+//   - email_log says "sent" but audit_log has no email_sent row (the bug pattern:
+//     a run died between the email_log write and the audit write). These donors
+//     DID receive the email (MailApp returned), so audit is backfilled to match -
+//     marking email_log back to need-send would double-email them.
+//   - audit_log has email_sent but email_log row is missing/failed (rarer; flagged
+//     only - the operational state is corrected on the next send pass).
+// Read-only except for backfilling missing audit rows. Run from the menu.
+function reconcileEmailLogs() {
+  const ss = getSpreadsheet();
+  const logSheet = ss.getSheetByName('email_log');
+  const auditSheet = ss.getSheetByName('audit_log');
+  if (!logSheet || logSheet.getLastRow() < 2) {
+    try { SpreadsheetApp.getUi().alert('email_log is empty.'); } catch (_) {}
+    return { checked: 0, backfilled: 0, flagged: 0 };
+  }
+
+  // Set of emails that have an email_sent audit row.
+  const auditSent = new Set();
+  if (auditSheet && auditSheet.getLastRow() > 1) {
+    const a = auditSheet.getRange(2, 1, auditSheet.getLastRow() - 1, 4).getValues();
+    a.forEach(r => {
+      if ((r[2] || '').toString() === 'email_sent') {
+        const key = (r[3] || '').toString().toLowerCase().trim();
+        if (key) auditSent.add(key);
+      }
+    });
+  }
+
+  const log = logSheet.getRange(2, 1, logSheet.getLastRow() - 1, 4).getValues();
+  let backfilled = 0;
+  const flagged = [];
+  log.forEach(r => {
+    const email = (r[0] || '').toString().toLowerCase().trim();
+    if (!email) return;
+    const status = (r[3] || '').toString().toLowerCase();
+    const sentInLog = status.indexOf('sent') === 0;
+    const sentInAudit = auditSent.has(email);
+
+    if (sentInLog && !sentInAudit) {
+      // email_log says sent, audit missing -> backfill audit (donor already emailed).
+      auditLog(ss, 'reconcileEmailLogs', 'email_sent', email, 'initial',
+        '', 'sent (backfilled from email_log)', '');
+      backfilled++;
+    } else if (!sentInLog && sentInAudit) {
+      flagged.push(email);
+    }
+  });
+
+  Logger.log('reconcileEmailLogs: backfilled=' + backfilled +
+    ' flagged=' + flagged.length + (flagged.length ? ' :: ' + flagged.join(', ') : ''));
+  try {
+    SpreadsheetApp.getUi().alert(
+      'Reconcile complete.\n\n' +
+      'email_log rows checked: ' + log.length + '\n' +
+      'Audit rows backfilled (sent in log, missing in audit): ' + backfilled + '\n' +
+      'Flagged (sent in audit, not sent in log): ' + flagged.length +
+      (flagged.length ? '\n  ' + flagged.slice(0, 15).join('\n  ') : '') +
+      (flagged.length ? '\n\nFlagged rows are left as-is; the next send pass corrects email_log.' : ''));
+  } catch (_) {}
+
+  return { checked: log.length, backfilled: backfilled, flagged: flagged.length };
 }
