@@ -118,9 +118,12 @@ function writeBackPANs_(dryRun) {
       }
 
       if (dryRun) {
-        Logger.log('[DRY RUN] Would update donation_id=' + c.donationId +
+        // Dry-run is sheet-only (no dana GET), so it reflects the imported snapshot.
+        // The live "already PAN in dana" and required-field checks run on a real push.
+        Logger.log('[DRY RUN] Would attempt donation_id=' + c.donationId +
           ' receipt=' + c.receiptNo +
-          ' (' + c.currentIdType + ' -> PAN ' + maskPAN(c.pan) + ')');
+          ' (' + c.currentIdType + ' -> PAN ' + maskPAN(c.pan) +
+          '); live dana state verified at push time');
         succeeded++;
         consec = 0;
         continue;
@@ -144,6 +147,31 @@ function writeBackPANs_(dryRun) {
         // Small delay to avoid hammering the dana server
         Utilities.sleep(800);
       } catch (err) {
+        // dana already has PAN (updated out-of-band in the portal). The work is
+        // effectively done - stamp the row so it leaves the candidate pool for good,
+        // exactly as a successful push would. Not a failure, not a retry.
+        if (/^ALREADY_PAN:/.test(err.message)) {
+          Logger.log('ALREADY_PAN ' + c.receiptNo + ' (donation_id=' + c.donationId + ')');
+          if (c.donationId) sheet.getRange(c.rowIndex, 25).setValue(c.donationId);
+          sheet.getRange(c.rowIndex, 26).setValue(new Date().toISOString());
+          auditLog(ss, 'writeBack', 'dana_already_pan',
+            c.receiptNo, 'd_id_type', c.currentIdType, 'PAN (already set in dana)', c.donationId);
+          skipped++;
+          consec = 0;
+          continue;
+        }
+        // A "SKIP:" error is a deliberate pre-flight refusal (e.g. required field
+        // empty), not a dana failure. Count it as skipped and do NOT advance the
+        // consecutive-error counter - otherwise three course-less records in a row
+        // would trip the circuit breaker and halt the whole batch.
+        if (/^SKIP:/.test(err.message)) {
+          Logger.log('SKIP ' + c.receiptNo + ' (donation_id=' + c.donationId + '): ' + err.message);
+          auditLog(ss, 'writeBack', 'dana_update_skipped',
+            c.receiptNo, '', '', err.message.substring(0, 400), c.donationId);
+          skipped++;
+          consec = 0;
+          continue;
+        }
         Logger.log('Update FAILED for ' + c.receiptNo + ' (donation_id=' + c.donationId + '): ' + err.message);
         auditLog(ss, 'writeBack', 'dana_update_failed',
           c.receiptNo, '', '', err.message.substring(0, 400), c.donationId);
@@ -323,6 +351,32 @@ function postDonationEdit_(baseUrl, sessionCookie, donationId, newPan) {
     throw new Error('Could not extract form tokens from edit page');
   }
 
+  // Live check: dana's CURRENT id_type (the sheet's id_type column is only a
+  // snapshot from import time). If the PAN was added directly in the portal after
+  // our last import, dana already shows PAN here - skip the redundant write and let
+  // the caller mark the row done so it is never revisited.
+  if ((values.d_id_type || '').toString().trim() === DANA_ID_TYPE_PAN) {
+    throw new Error('ALREADY_PAN: dana already has id_type=PAN for this donation (updated in the portal) - no write needed.');
+  }
+
+  // Pre-flight: if a NOT-NULL dana column came back empty (e.g. d_course on a
+  // course-less donation), POSTing would write NULL and throw a 1048 PDOException.
+  // Refuse and report instead of corrupting / failing the slip blindly.
+  const missingRequired = findEmptyRequiredFields_(values);
+  if (missingRequired.length) {
+    const hints = (values.__emptySelects || [])
+      .filter(s => missingRequired.indexOf(s.name) >= 0)
+      .map(s => s.name + (s.firstNonEmpty ? ' (first option=' + s.firstNonEmpty + ')' : ''))
+      .join(', ');
+    throw new Error('SKIP: required dana field(s) empty on edit form: ' +
+      missingRequired.join(', ') +
+      (hints ? ' [' + hints + ']' : '') +
+      ' - set the course in the dana portal for this donation, then re-push.');
+  }
+
+  // Internal diagnostic key - must never be POSTed.
+  delete values.__emptySelects;
+
   // Override id_type and id_no with PAN
   values.d_id_type = DANA_ID_TYPE_PAN;
   values.d_id_no = newPan;
@@ -406,16 +460,53 @@ function extractFormValues_(html) {
     values[m[1]] = decodeHtml_(m[2]);
   }
 
-  // Selects - find the selected option
+  // Selects - take the selected option's value. If the selected option is the
+  // default empty placeholder (value="") or no option is marked selected, fall back
+  // to the first NON-EMPTY option value. This guards required selects (e.g. d_course)
+  // whose edit-form selection is the empty "- Select -" row: posting "" there makes
+  // Drupal write NULL and throws "Column 'd_course' cannot be null" (1048).
   const selRe = /<select\b[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/select>/gi;
   while ((m = selRe.exec(html)) !== null) {
+    const name = m[1];
     const optsHtml = m[2];
-    let opt = optsHtml.match(/<option\b[^>]*\bselected\b[^>]*\bvalue="([^"]*)"/);
-    if (!opt) opt = optsHtml.match(/<option\b[^>]*\bvalue="([^"]*)"[^>]*\bselected\b/);
-    if (opt) values[m[1]] = decodeHtml_(opt[1]);
+
+    // Find the selected option's value (either attribute order).
+    let sel = optsHtml.match(/<option\b[^>]*\bselected\b[^>]*?\bvalue="([^"]*)"/i);
+    if (!sel) sel = optsHtml.match(/<option\b[^>]*\bvalue="([^"]*)"[^>]*?\bselected\b/i);
+    let selectedVal = sel ? decodeHtml_(sel[1]) : '';
+
+    values[name] = selectedVal;
+
+    // Record selects that resolved to empty so the caller can pre-flight required ones.
+    if (selectedVal === '') {
+      if (!values.__emptySelects) values.__emptySelects = [];
+      // First non-empty option, as a diagnostic hint (NOT auto-applied).
+      const firstNonEmpty = optsHtml.match(/<option\b[^>]*\bvalue="([^"]+)"/i);
+      values.__emptySelects.push({
+        name: name,
+        firstNonEmpty: firstNonEmpty ? decodeHtml_(firstNonEmpty[1]) : ''
+      });
+    }
   }
 
   return values;
+}
+
+// Required dana fields that must be non-empty on a donation UPDATE. Derived from the
+// observed PDOException (d_course NOT NULL). Extend as other NOT-NULL columns surface
+// in audit_log. A candidate hitting any of these is SKIPPED (reported), never posted
+// with a blank that would write NULL into the source of truth.
+const DANA_REQUIRED_FIELDS = ['d_course'];
+
+// Inspect extracted form values for required fields that are empty/missing.
+// Returns an array of offending field names (empty = safe to POST).
+function findEmptyRequiredFields_(values) {
+  const missing = [];
+  DANA_REQUIRED_FIELDS.forEach(f => {
+    const v = values[f];
+    if (v === undefined || v === null || v.toString().trim() === '') missing.push(f);
+  });
+  return missing;
 }
 
 function decodeHtml_(s) {
