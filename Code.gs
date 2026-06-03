@@ -258,5 +258,10 @@ function initSheets() {
     'wa_status', 'wa_message_id', 'reminder_count', 'submitted_at', 'last_reminder_at'
   ]);
 
+  getOrCreateSheet(ss, 'wa_nudge_log', [
+    'phone', 'email', 'receipt_nos_in_wa', 'sent_at',
+    'wa_status', 'wa_message_id', 'reminder_count', 'submitted_at', 'last_reminder_at'
+  ]);
+
   SpreadsheetApp.getUi().alert('All sheets initialized with new schema.');
 }

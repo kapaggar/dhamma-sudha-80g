@@ -1,25 +1,29 @@
 // Whatsapp.gs
-// Outbound WhatsApp PAN-request via 360dialog (On-Premise / v1 API), called DIRECTLY
-// from Apps Script. Mirrors the email flow: find need_pan donors, send each an
-// approved template carrying the SAME signed PAN-collection link used in email,
-// throttle, log to wa_log, retry failures on the next run.
+// Outbound WhatsApp to need_pan donors via 360dialog (Cloud API v2), direct from Apps
+// Script. Two campaigns share one send loop (runWaSend_):
+//   1. Direct link  (sendPendingWhatsApp)     - needs a NEW approved template carrying
+//                                                the signed PAN link; logs to wa_log.
+//   2. Email nudge  (sendPendingWhatsAppNudge) - reuses the already-approved
+//                                                status_update_2 template (no link);
+//                                                nudges donors to check their email;
+//                                                logs to wa_nudge_log.
 //
-// Why direct (not via dipi): send_whatsapp_360() in dipi_api.module is internal-only
-// (the exposed /wa-hook endpoints are inbound webhooks). 360dialog's /messages is the
-// only way to INITIATE an outbound template send, so we POST it ourselves.
-//
-// REQUIRED Script Properties (Project Settings > Script Properties):
-//   WA360_URL        360dialog base, no trailing slash. This WABA is on the Cloud API:
-//                    https://waba-v2.360dialog.io   (NOT the old waba.360dialog.io/v1)
+// REQUIRED Script Properties:
+//   WA360_URL        https://waba-v2.360dialog.io   (Cloud API; no trailing slash)
 //   WA360_API_KEY    360dialog API key (sent as D360-Api-Key). NEVER hardcode. ROTATE if leaked.
+// For the DIRECT-LINK campaign also:
 //   WA_TEMPLATE_NAME approved template name (link-in-body, 3 params: name, centre, link)
 // OPTIONAL Script Properties:
-//   WA_API_VERSION   'v2' (Cloud, default - matches the live VRI config) or 'v1' (On-Premise)
-//   WA360_NAMESPACE  template namespace (only used when WA_API_VERSION=v1; record for reference)
-//   WA_TEMPLATE_LANG language code, default 'en' (set 'hi' for a Hindi template)
-//   WA_MAX_PER_RUN   per-invocation cap (default WA_MAX_PER_RUN_DEFAULT)
+//   WA_API_VERSION         'v2' (Cloud, default) or 'v1' (On-Premise)
+//   WA360_NAMESPACE        template namespace (only used when WA_API_VERSION=v1)
+//   WA_TEMPLATE_LANG       direct-link template language, default 'en'
+//   WA_NUDGE_TEMPLATE_NAME nudge template, default 'status_update_2'
+//   WA_NUDGE_LANG          nudge template language, default 'en'
+//   WA_NUDGE_SUBJECT       nudge {{2}} text, default 'your 80G donation tax-exemption certificate'
+//   WA_NUDGE_STATUS        nudge {{3}} text (rendered bold), default 'PAN pending'
+//   WA_MAX_PER_RUN         per-invocation cap (default WA_MAX_PER_RUN_DEFAULT)
 //
-// See WHATSAPP_SETUP.md for the template to register and the property values.
+// See WHATSAPP_SETUP.md for the templates and property values.
 
 // --- Throttling ------------------------------------------------------------
 // 360dialog/Meta enforce a business-initiated messaging limit per 24h (tiered:
@@ -134,45 +138,55 @@ function sendWhatsApp360_(opts) {
   return { ok: (code < 300 && !!messageId), code: code, messageId: messageId, error: error };
 }
 
-// Send the PAN-request WhatsApp to every need_pan donor not already wa-sent.
+// Shared send loop for both WhatsApp campaigns (direct-link and email-nudge).
+// cfg: {
+//   templateName, lang, logSheetName, kindLabel (audit actor),
+//   buildParams(email, info) -> [str,...]   (the template body params),
+//   requireEmailedOk (bool: only message donors whose email_log status is 'sent'),
+//   tipLabel (menu item shown in the "drains the rest" tip), silent (bool)
+// }
 // silent=true suppresses UI alerts (for triggers). Returns a stats object.
-function sendPendingWhatsApp(silent) {
+function runWaSend_(cfg) {
   const ss = getSpreadsheet();
   const donors = ss.getSheetByName('donors_input');
   if (!donors || donors.getLastRow() < 2) {
-    if (!silent) { try { SpreadsheetApp.getUi().alert('No donor records.'); } catch (_) {} }
-    return { sent: 0, failed: 0, skippedNoPhone: 0, pending: 0, remaining: null };
+    if (!cfg.silent) { try { SpreadsheetApp.getUi().alert('No donor records.'); } catch (_) {} }
+    return { sent: 0, failed: 0, skippedNoPhone: 0, skippedNoEmail: 0, pending: 0, stopReason: '' };
   }
 
-  const props = PropertiesService.getScriptProperties();
-  const webAppUrl = props.getProperty('WEB_APP_URL');
-  if (!webAppUrl) throw new Error('WEB_APP_URL script property not set.');
-  const templateName = props.getProperty('WA_TEMPLATE_NAME');
-  if (!templateName) {
-    throw new Error('WA_TEMPLATE_NAME not set. Register a 360dialog template and set ' +
-      'WA_TEMPLATE_NAME, WA360_URL, WA360_API_KEY, WA360_NAMESPACE (see WHATSAPP_SETUP.md).');
-  }
-  const lang = props.getProperty('WA_TEMPLATE_LANG') || 'en';
-  const namespace = props.getProperty('WA360_NAMESPACE') || '';
-  const centerName = getCenterName();
-
-  const waLog = getOrCreateSheet(ss, 'wa_log', [
+  const logSheet = getOrCreateSheet(ss, cfg.logSheetName, [
     'phone', 'email', 'receipt_nos_in_wa', 'sent_at',
     'wa_status', 'wa_message_id', 'reminder_count', 'submitted_at', 'last_reminder_at'
   ]);
 
-  // (a) emails already wa-sent (skip), and (b) email -> existing wa_log row, so a
+  // (a) emails already sent IN THIS CHANNEL (skip), and (b) email -> existing row, so a
   // previously-failed row is UPDATED in place rather than appended (one row per donor).
   const sentEmails = new Set();
-  const waRowByEmail = {};
-  if (waLog.getLastRow() > 1) {
-    const rows = waLog.getRange(2, 1, waLog.getLastRow() - 1, 5).getValues(); // phone,email,receipts,sent_at,status
+  const rowByEmail = {};
+  if (logSheet.getLastRow() > 1) {
+    const rows = logSheet.getRange(2, 1, logSheet.getLastRow() - 1, 5).getValues(); // phone,email,receipts,sent_at,status
     for (let i = 0; i < rows.length; i++) {
       const e = (rows[i][1] || '').toString().toLowerCase().trim();
       if (!e) continue;
-      waRowByEmail[e] = i + 2;
+      rowByEmail[e] = i + 2;
       const status = (rows[i][4] || '').toString().toLowerCase();
       if (status.indexOf('sent') === 0) sentEmails.add(e);
+    }
+  }
+
+  // Optional truthfulness gate: only message donors we actually emailed, so a
+  // "check your email" nudge is honest. Built from email_log (col A email, col D status).
+  let emailedOk = null;
+  if (cfg.requireEmailedOk) {
+    emailedOk = new Set();
+    const el = ss.getSheetByName('email_log');
+    if (el && el.getLastRow() > 1) {
+      const er = el.getRange(2, 1, el.getLastRow() - 1, 4).getValues();
+      er.forEach(x => {
+        const e = (x[0] || '').toString().toLowerCase().trim();
+        const s = (x[3] || '').toString().toLowerCase();
+        if (e && s.indexOf('sent') === 0) emailedOk.add(e);
+      });
     }
   }
 
@@ -191,46 +205,48 @@ function sendPendingWhatsApp(silent) {
 
   const eligible = Object.keys(byEmail).filter(e => !sentEmails.has(e)).sort();
   const maxPerRun = getWaMaxPerRun_();
+  const namespace = PropertiesService.getScriptProperties().getProperty('WA360_NAMESPACE') || '';
 
-  let sent = 0, failed = 0, skippedNoPhone = 0;
+  let sent = 0, failed = 0, skippedNoPhone = 0, skippedNoEmail = 0;
   let stopReason = '';
 
   for (const email of eligible) {
     if (sent >= maxPerRun) { stopReason = 'per-run cap (' + maxPerRun + ') reached'; break; }
 
     const info = byEmail[email];
+
+    // Nudge gate: skip donors we never emailed (no row written - they simply aren't nudged).
+    if (emailedOk && !emailedOk.has(email)) { skippedNoEmail++; continue; }
+
     const nowIso = new Date().toISOString();
     const receiptList = info.receipts.join(',');
     const phone = normalizePhoneIN_(info.mobile);
 
     if (!phone) {
       Logger.log('No valid phone for ' + email + ' (raw="' + info.mobile + '")');
-      writeWaLogRow_(waLog, waRowByEmail, '', email, receiptList, nowIso, 'failed: invalid_or_missing_phone', '');
+      writeWaLogRow_(logSheet, rowByEmail, '', email, receiptList, nowIso, 'failed: invalid_or_missing_phone', '');
       skippedNoPhone++;
       continue;
     }
 
-    const token = generateToken(email);
-    const link = webAppUrl + '?email=' + encodeURIComponent(email) + '&token=' + encodeURIComponent(token);
-
     const res = sendWhatsApp360_({
       to: phone,
-      templateName: templateName,
-      lang: lang,
+      templateName: cfg.templateName,
+      lang: cfg.lang,
       namespace: namespace,
-      bodyParams: [ (info.name || 'Meditator'), centerName, link ]
+      bodyParams: cfg.buildParams(email, info)
     });
 
     if (res.ok) {
       // Write the durable audit row FIRST (same ordering rule as email): fail toward
-      // "audit has it, wa_log doesn't" (re-send) rather than a silent gap.
-      auditLog(ss, 'sendWhatsApp', 'whatsapp_sent', email, 'initial', '', 'sent:' + maskPhone_(phone), res.messageId || '');
-      writeWaLogRow_(waLog, waRowByEmail, phone, email, receiptList, nowIso, 'sent', res.messageId || '');
+      // "audit has it, log doesn't" (re-send) rather than a silent gap.
+      auditLog(ss, cfg.kindLabel, 'whatsapp_sent', email, 'initial', '', 'sent:' + maskPhone_(phone), res.messageId || '');
+      writeWaLogRow_(logSheet, rowByEmail, phone, email, receiptList, nowIso, 'sent', res.messageId || '');
       sent++;
       Utilities.sleep(WA_SEND_SLEEP_MS);
     } else {
       Logger.log('WA send FAILED ' + email + ' (' + maskPhone_(phone) + '): HTTP ' + res.code + ' ' + (res.error || ''));
-      writeWaLogRow_(waLog, waRowByEmail, phone, email, receiptList, nowIso,
+      writeWaLogRow_(logSheet, rowByEmail, phone, email, receiptList, nowIso,
         'failed: HTTP ' + res.code + ' ' + (res.error || '').substring(0, 120), res.messageId || '');
       failed++;
       // Provider rate/limit -> every later send will also fail; stop now.
@@ -243,19 +259,73 @@ function sendPendingWhatsApp(silent) {
 
   const pending = eligible.length - sent; // not-yet-sent this run (includes failed / no-phone)
 
-  if (!silent) {
+  if (!cfg.silent) {
     try {
       SpreadsheetApp.getUi().alert(
-        'WhatsApp sent:      ' + sent + '\n' +
+        'Sent:               ' + sent + '\n' +
         'Failed:             ' + failed + '\n' +
         'No valid phone:     ' + skippedNoPhone + '\n' +
+        (cfg.requireEmailedOk ? 'Skipped (no email): ' + skippedNoEmail + '\n' : '') +
         'Still pending:      ' + pending +
         (stopReason ? '\n\nStopped: ' + stopReason : '') +
-        (pending > 0 ? '\n\nTip: 4. WhatsApp Donors > Enable Hourly WhatsApp Sending drains the rest automatically.' : ''));
+        (pending > 0 && cfg.tipLabel ? '\n\nTip: 4. WhatsApp Donors > ' + cfg.tipLabel + ' drains the rest automatically.' : ''));
     } catch (_) {}
   }
 
-  return { sent: sent, failed: failed, skippedNoPhone: skippedNoPhone, pending: pending, stopReason: stopReason };
+  return { sent: sent, failed: failed, skippedNoPhone: skippedNoPhone, skippedNoEmail: skippedNoEmail, pending: pending, stopReason: stopReason };
+}
+
+// Campaign 1 - DIRECT LINK: needs a NEW approved template carrying the signed PAN link.
+// silent=true suppresses UI alerts (for triggers). Returns a stats object.
+function sendPendingWhatsApp(silent) {
+  const props = PropertiesService.getScriptProperties();
+  const webAppUrl = props.getProperty('WEB_APP_URL');
+  if (!webAppUrl) throw new Error('WEB_APP_URL script property not set.');
+  const templateName = props.getProperty('WA_TEMPLATE_NAME');
+  if (!templateName) {
+    throw new Error('WA_TEMPLATE_NAME not set. Register a 360dialog template and set ' +
+      'WA_TEMPLATE_NAME, WA360_URL, WA360_API_KEY (see WHATSAPP_SETUP.md). To message ' +
+      'donors right now without a new template, use "Send Email Nudge" instead.');
+  }
+  const centerName = getCenterName();
+  return runWaSend_({
+    templateName: templateName,
+    lang: props.getProperty('WA_TEMPLATE_LANG') || 'en',
+    logSheetName: 'wa_log',
+    kindLabel: 'sendWhatsApp',
+    requireEmailedOk: false,
+    tipLabel: 'Enable Hourly Link Sending',
+    silent: silent,
+    buildParams: function (email, info) {
+      const token = generateToken(email);
+      const link = webAppUrl + '?email=' + encodeURIComponent(email) + '&token=' + encodeURIComponent(token);
+      return [ (info.name || 'Meditator'), centerName, link ];
+    }
+  });
+}
+
+// Campaign 2 - EMAIL NUDGE: reuses the already-approved status_update_2 template, so no
+// new approval / wait. It carries NO link; it just nudges the donor to check the email we
+// already sent (gated to donors whose email actually went out, so the message is truthful).
+// Logged to a SEPARATE sheet (wa_nudge_log) so a nudge does NOT mark the donor 'sent' in
+// wa_log and suppress the real direct-link send once that template is approved.
+// status_update_2 body: "Dear {{1}},\nThe status of your application for \n{{2}}\nis *{{3}}*.\nCheck email for details"
+function sendPendingWhatsAppNudge(silent) {
+  const props = PropertiesService.getScriptProperties();
+  const subject = props.getProperty('WA_NUDGE_SUBJECT') || 'your 80G donation tax-exemption certificate';
+  const status = props.getProperty('WA_NUDGE_STATUS') || 'PAN pending';
+  return runWaSend_({
+    templateName: props.getProperty('WA_NUDGE_TEMPLATE_NAME') || 'status_update_2',
+    lang: props.getProperty('WA_NUDGE_LANG') || 'en',
+    logSheetName: 'wa_nudge_log',
+    kindLabel: 'sendWaNudge',
+    requireEmailedOk: true,
+    tipLabel: 'Enable Hourly Nudge Sending',
+    silent: silent,
+    buildParams: function (email, info) {
+      return [ (info.name || 'Meditator'), subject, status ];
+    }
+  });
 }
 
 // Update an existing wa_log row for this email if present, else append. One row per
@@ -352,4 +422,80 @@ function disableHourlyWhatsAppTrigger() {
     if (t.getHandlerFunction() === 'autoSendWhatsAppHourly') { ScriptApp.deleteTrigger(t); removed++; }
   });
   SpreadsheetApp.getUi().alert('Removed ' + removed + ' hourly WhatsApp trigger(s).');
+}
+
+// ---------------------------------------------------------------------------
+// Test the EMAIL-NUDGE template (status_update_2) to one number, sample params.
+// Send this to your own phone first, before any real nudge run.
+// ---------------------------------------------------------------------------
+function promptTestWhatsAppNudge() {
+  const ui = SpreadsheetApp.getUi();
+  const props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('WA360_URL') || !props.getProperty('WA360_API_KEY')) {
+    ui.alert('Set WA360_URL and WA360_API_KEY first (see WHATSAPP_SETUP.md).');
+    return;
+  }
+  const resp = ui.prompt('Test WhatsApp nudge',
+    'Enter a 10-digit mobile (or with 91/+91). A sample "PAN pending - check email" nudge ' +
+    'will be sent using the approved status_update_2 template.',
+    ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+  const phone = normalizePhoneIN_(resp.getResponseText());
+  if (!phone) { ui.alert('Not a valid Indian mobile number.'); return; }
+
+  const subject = props.getProperty('WA_NUDGE_SUBJECT') || 'your 80G donation tax-exemption certificate';
+  const status = props.getProperty('WA_NUDGE_STATUS') || 'PAN pending';
+  const res = sendWhatsApp360_({
+    to: phone,
+    templateName: props.getProperty('WA_NUDGE_TEMPLATE_NAME') || 'status_update_2',
+    lang: props.getProperty('WA_NUDGE_LANG') || 'en',
+    namespace: props.getProperty('WA360_NAMESPACE') || '',
+    bodyParams: ['Test', subject, status]
+  });
+  ui.alert(res.ok
+    ? 'Nudge sent to ' + maskPhone_(phone) + '\nmessage id: ' + res.messageId
+    : 'Send failed (HTTP ' + res.code + ')\n' + (res.error || ''));
+}
+
+// ---------------------------------------------------------------------------
+// Hourly EMAIL-NUDGE trigger (drains a large list within the 24h limit)
+// ---------------------------------------------------------------------------
+function autoSendWhatsAppNudgeHourly() {
+  try {
+    const r = sendPendingWhatsAppNudge(true);
+    Logger.log('autoSendWhatsAppNudgeHourly: ' + JSON.stringify(r));
+  } catch (err) {
+    Logger.log('autoSendWhatsAppNudgeHourly failed: ' + err.message);
+    try {
+      const adminEmail = Session.getActiveUser().getEmail();
+      if (adminEmail) {
+        MailApp.sendEmail(adminEmail,
+          '[80G System] Hourly WhatsApp nudge failed',
+          'Error: ' + err.message + '\n\nCheck the Apps Script execution log.');
+      }
+    } catch (_) {}
+  }
+}
+
+function installHourlyWhatsAppNudgeTrigger() {
+  const triggers = ScriptApp.getProjectTriggers();
+  let removed = 0;
+  triggers.forEach(t => {
+    if (t.getHandlerFunction() === 'autoSendWhatsAppNudgeHourly') { ScriptApp.deleteTrigger(t); removed++; }
+  });
+  ScriptApp.newTrigger('autoSendWhatsAppNudgeHourly').timeBased().everyHours(1).create();
+  SpreadsheetApp.getUi().alert(
+    'Hourly WhatsApp nudge enabled.\n\n' +
+    'Removed: ' + removed + ' existing trigger(s).\n' +
+    'Up to ' + getWaMaxPerRun_() + ' nudges will be sent each hour, within the 24h limit. ' +
+    'To stop, use "Disable Hourly Nudge Sending".');
+}
+
+function disableHourlyWhatsAppNudgeTrigger() {
+  const triggers = ScriptApp.getProjectTriggers();
+  let removed = 0;
+  triggers.forEach(t => {
+    if (t.getHandlerFunction() === 'autoSendWhatsAppNudgeHourly') { ScriptApp.deleteTrigger(t); removed++; }
+  });
+  SpreadsheetApp.getUi().alert('Removed ' + removed + ' hourly WhatsApp nudge trigger(s).');
 }
