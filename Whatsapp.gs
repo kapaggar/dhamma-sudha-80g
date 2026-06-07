@@ -38,6 +38,22 @@ function getWaMaxPerRun_() {
   return (!isNaN(v) && v > 0) ? v : WA_MAX_PER_RUN_DEFAULT;
 }
 
+// Minimum donor total (sum of pending receipt amounts) for the high-value link campaign.
+// Configurable via WA_MIN_AMOUNT script property; defaults to 10000.
+const WA_MIN_AMOUNT_DEFAULT = 10000;
+function getWaMinAmount_() {
+  const v = parseFloat(PropertiesService.getScriptProperties().getProperty('WA_MIN_AMOUNT'));
+  return (!isNaN(v) && v > 0) ? v : WA_MIN_AMOUNT_DEFAULT;
+}
+
+// Parse a donors_input amount cell (number, or string with commas/currency) to a number.
+function parseAmount_(v) {
+  if (v === null || v === undefined || v === '') return 0;
+  if (typeof v === 'number') return isNaN(v) ? 0 : v;
+  const n = parseFloat(v.toString().replace(/[^0-9.\-]/g, ''));
+  return isNaN(n) ? 0 : n;
+}
+
 // Normalize an Indian mobile to 91XXXXXXXXXX, or null if not a valid 10-digit mobile.
 // Strips +, spaces, dashes, parentheses; drops a leading 91 (12 digits) or 0 (11).
 function normalizePhoneIN_(raw) {
@@ -198,12 +214,20 @@ function runWaSend_(cfg) {
     const email = (row[4] || '').toString().toLowerCase().trim();
     if (!email) continue;
     if (row[20] !== 'need_pan') continue;
-    if (!byEmail[email]) byEmail[email] = { name: row[3] || '', mobile: '', receipts: [] };
+    if (!byEmail[email]) byEmail[email] = { name: row[3] || '', mobile: '', receipts: [], amount: 0 };
     if (!byEmail[email].mobile && row[5]) byEmail[email].mobile = row[5];
     byEmail[email].receipts.push(row[0]);
+    byEmail[email].amount += parseAmount_(row[14]); // O = amount
   }
 
-  const eligible = Object.keys(byEmail).filter(e => !sentEmails.has(e)).sort();
+  // Optional high-value gate: only donors whose summed pending amount exceeds minAmount.
+  const minAmount = cfg.minAmount || 0;
+  let belowThreshold = 0;
+  const eligible = Object.keys(byEmail).filter(e => {
+    if (sentEmails.has(e)) return false;
+    if (minAmount > 0 && !(byEmail[e].amount > minAmount)) { belowThreshold++; return false; }
+    return true;
+  }).sort();
   const maxPerRun = getWaMaxPerRun_();
   const namespace = PropertiesService.getScriptProperties().getProperty('WA360_NAMESPACE') || '';
 
@@ -266,13 +290,14 @@ function runWaSend_(cfg) {
         'Failed:             ' + failed + '\n' +
         'No valid phone:     ' + skippedNoPhone + '\n' +
         (cfg.requireEmailedOk ? 'Skipped (no email): ' + skippedNoEmail + '\n' : '') +
+        (minAmount > 0 ? 'Below ' + minAmount + ':       ' + belowThreshold + '\n' : '') +
         'Still pending:      ' + pending +
         (stopReason ? '\n\nStopped: ' + stopReason : '') +
         (pending > 0 && cfg.tipLabel ? '\n\nTip: 4. WhatsApp Donors > ' + cfg.tipLabel + ' drains the rest automatically.' : ''));
     } catch (_) {}
   }
 
-  return { sent: sent, failed: failed, skippedNoPhone: skippedNoPhone, skippedNoEmail: skippedNoEmail, pending: pending, stopReason: stopReason };
+  return { sent: sent, failed: failed, skippedNoPhone: skippedNoPhone, skippedNoEmail: skippedNoEmail, belowThreshold: belowThreshold, pending: pending, stopReason: stopReason };
 }
 
 // Campaign 1 - DIRECT LINK: needs a NEW approved template carrying the signed PAN link.
@@ -295,6 +320,37 @@ function sendPendingWhatsApp(silent) {
     kindLabel: 'sendWhatsApp',
     requireEmailedOk: false,
     tipLabel: 'Enable Hourly Link Sending',
+    silent: silent,
+    buildParams: function (email, info) {
+      const token = generateToken(email);
+      const link = webAppUrl + '?email=' + encodeURIComponent(email) + '&token=' + encodeURIComponent(token);
+      return [ (info.name || 'Meditator'), centerName, link ];
+    }
+  });
+}
+
+// Campaign 1b - HIGH-VALUE DIRECT LINK: same link template as sendPendingWhatsApp, but only
+// to donors whose summed pending (need_pan) donation amount exceeds WA_MIN_AMOUNT (default
+// 10000). Shares wa_log with the general link campaign, so dedup is shared: a donor messaged
+// by either run is not messaged again by the other.
+function sendHighValuePendingWhatsApp(silent) {
+  const props = PropertiesService.getScriptProperties();
+  const webAppUrl = props.getProperty('WEB_APP_URL');
+  if (!webAppUrl) throw new Error('WEB_APP_URL script property not set.');
+  const templateName = props.getProperty('WA_TEMPLATE_NAME');
+  if (!templateName) {
+    throw new Error('WA_TEMPLATE_NAME not set. Register a 360dialog template and set ' +
+      'WA_TEMPLATE_NAME, WA360_URL, WA360_API_KEY (see WHATSAPP_SETUP.md).');
+  }
+  const centerName = getCenterName();
+  return runWaSend_({
+    templateName: templateName,
+    lang: props.getProperty('WA_TEMPLATE_LANG') || 'en',
+    logSheetName: 'wa_log',
+    kindLabel: 'sendWhatsAppHighValue',
+    requireEmailedOk: false,
+    minAmount: getWaMinAmount_(),
+    tipLabel: '',
     silent: silent,
     buildParams: function (email, info) {
       const token = generateToken(email);

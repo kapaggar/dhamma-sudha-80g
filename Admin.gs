@@ -32,6 +32,7 @@ function onOpen() {
       .addItem('Disable Hourly Nudge Sending', 'disableHourlyWhatsAppNudgeTrigger')
       .addSeparator()
       .addItem('Send PAN Request - direct link (needs new template)', 'sendPendingWhatsApp')
+      .addItem('Send PAN link to High-Value Donors (>WA_MIN_AMOUNT, dflt 10k)', 'sendHighValuePendingWhatsApp')
       .addItem('Send Test WhatsApp link (one number)', 'promptTestWhatsApp')
       .addItem('Enable Hourly Link Sending', 'installHourlyWhatsAppTrigger')
       .addItem('Disable Hourly Link Sending', 'disableHourlyWhatsAppTrigger'))
