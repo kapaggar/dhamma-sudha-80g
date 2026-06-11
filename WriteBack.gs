@@ -359,21 +359,25 @@ function postDonationEdit_(baseUrl, sessionCookie, donationId, newPan) {
     throw new Error('ALREADY_PAN: dana already has id_type=PAN for this donation (updated in the portal) - no write needed.');
   }
 
-  // Pre-flight: a required field that is genuinely unset (no option selected, or a
-  // "- Select -" placeholder) would write NULL and throw a 1048 PDOException. Refuse
-  // and report instead of corrupting / failing the slip. A real selection like
-  // "Non Course" (value="") is NOT flagged here - it is replayed faithfully.
+  // Pre-flight: a required field that is genuinely unset (no usable option, or a
+  // "- Select -" placeholder) would risk a NULL/blank write and a 1048 PDOException.
+  // Refuse and report instead of corrupting / failing the slip. A real selection -
+  // including a first-option browser default like "Non Course" (value="0") - is NOT
+  // flagged here; it is replayed faithfully. Only true placeholders reach this branch.
   const missingRequired = findEmptyRequiredFields_(values);
   if (missingRequired.length) {
     const meta = values.__selectMeta || {};
     const hints = missingRequired.map(name => {
       const sm = meta[name];
       if (!sm) return name;
-      const why = sm.hasExplicitSelected ? 'selected label="' + (sm.label || '') + '"' : 'no option selected';
-      return name + ' [' + why + (sm.firstNonEmpty ? ', first option=' + sm.firstNonEmpty : '') + ']';
+      const why = sm.hasExplicitSelected
+        ? 'selected label="' + (sm.label || '') + '"'
+        : 'no option selected, first option label="' + (sm.firstLabel || '') +
+          '" value="' + (sm.firstVal || '') + '"';
+      return name + ' [' + why + ']';
     }).join(', ');
     throw new Error('SKIP: required dana field(s) unset on edit form: ' + hints +
-      ' - set the course in the dana portal for this donation, then re-push.');
+      ' - this is a placeholder, not a real course; set a course in the dana portal, then re-push.');
   }
 
   // Internal diagnostic key - must never be POSTed.
@@ -462,17 +466,23 @@ function extractFormValues_(html) {
     values[m[1]] = decodeHtml_(m[2]);
   }
 
-  // Selects - replay the explicitly selected option's value faithfully, exactly as
-  // dana's own form would submit it. We capture the selected option's value AND its
-  // visible label, plus whether ANY option was explicitly marked selected. This lets
-  // the caller's pre-flight tell apart three cases for a required select like d_course:
-  //   1. A real choice is selected (e.g. "Non Course") - safe to POST, even when that
-  //      option's value attribute is empty ("Non Course" is value="" in dana; posting
-  //      "" is what the browser sends and what dana stored, so it is NOT a NULL write).
-  //   2. A placeholder is selected ("- Select -") - treat as unset.
-  //   3. No option selected at all - treat as unset.
-  // Cases 2 and 3 are still skipped (posting an unset required field risks the 1048
-  // "Column 'd_course' cannot be null" PDOException).
+  // Selects - replay exactly what dana's own browser would submit. HTML spec: a
+  // single-select with NO option explicitly marked `selected` submits its FIRST
+  // option. Drupal 7 frequently renders this form with the course already chosen
+  // client-side and no literal `selected=` attribute in the source HTML, so we must
+  // reproduce the browser's first-option default rather than substituting "".
+  //
+  // We capture, per select:
+  //   - selectedVal/Label: the explicitly-selected option, if any.
+  //   - firstVal/firstLabel: the first option (whatever it is), used as the submit
+  //     value when nothing is explicitly selected.
+  //   - hasExplicitSelected: whether ANY option carried a `selected` attribute.
+  // The value we actually stage for POST (values[name]) is the explicit selection if
+  // present, else the first option's value - matching the browser. This is what fixed
+  // the d_course case: "Non Course" is the first option with value="0" (NOT value="");
+  // the old code stored "" and POSTed a blank that tripped the 1048 NOT-NULL error.
+  // The caller's pre-flight then uses __selectMeta to skip true placeholders
+  // ("- Select -") while allowing real first-option defaults ("Non Course").
   const selRe = /<select\b[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/select>/gi;
   while ((m = selRe.exec(html)) !== null) {
     const name = m[1];
@@ -489,15 +499,26 @@ function extractFormValues_(html) {
       selectedLabel = decodeHtml_(selOpt[2].replace(/<[^>]+>/g, '')).trim();
     }
 
-    values[name] = selectedVal;
+    // The FIRST option (any value, including ""), for the browser-default fallback.
+    const firstOpt = optsHtml.match(/<option\b([^>]*)>([\s\S]*?)<\/option>/i);
+    let firstVal = '';
+    let firstLabel = '';
+    if (firstOpt) {
+      const fvm = firstOpt[1].match(/\bvalue="([^"]*)"/i);
+      firstVal = fvm ? decodeHtml_(fvm[1]) : '';
+      firstLabel = decodeHtml_(firstOpt[2].replace(/<[^>]+>/g, '')).trim();
+    }
+
+    // Stage the value the browser would submit: explicit selection, else first option.
+    values[name] = hasExplicitSelected ? selectedVal : firstVal;
 
     if (!values.__selectMeta) values.__selectMeta = {};
-    const firstNonEmpty = optsHtml.match(/<option\b[^>]*\bvalue="([^"]+)"/i);
     values.__selectMeta[name] = {
-      value: selectedVal,
-      label: selectedLabel,
+      value: values[name],
+      label: hasExplicitSelected ? selectedLabel : firstLabel,
       hasExplicitSelected: hasExplicitSelected,
-      firstNonEmpty: firstNonEmpty ? decodeHtml_(firstNonEmpty[1]) : ''
+      firstVal: firstVal,
+      firstLabel: firstLabel
     };
   }
 
@@ -517,19 +538,29 @@ const DANA_REQUIRED_FIELDS = ['d_course'];
 // Inspect extracted form values for required fields that are genuinely unset.
 // Returns an array of offending field names (empty = safe to POST).
 //
-// For a required <select>, "satisfied" means an option is explicitly selected AND its
-// label is a real choice (e.g. "Non Course") - even if that option's value attribute
-// is empty, since we replay the value dana itself submits. Only a select with no
-// selected option, or one whose selection is a placeholder ("- Select -"), counts as
-// missing. Non-select required fields are missing when blank, as before.
+// For a required <select>, "satisfied" means the value the browser would submit -
+// the explicitly-selected option if present, otherwise the FIRST option (HTML
+// default) - resolves to a real choice rather than a placeholder. extractFormValues_
+// already stages that browser-default value in values[name] and records the matching
+// label in __selectMeta, so here we judge the label/value pair:
+//   - "Non Course" (first option, value="0", label not placeholder) -> real choice, POST.
+//   - "- Select -" / "None" / "Choose" (placeholder label) -> unset, SKIP.
+//   - a select whose effective value is empty AND whose label is blank/placeholder
+//     -> unset, SKIP (would risk the 1048 NOT-NULL write).
+// Non-select required fields are missing when blank, as before.
 function findEmptyRequiredFields_(values) {
   const missing = [];
   const meta = values.__selectMeta || {};
   DANA_REQUIRED_FIELDS.forEach(f => {
     const sm = meta[f];
     if (sm) {
-      const realChoice = sm.hasExplicitSelected &&
-        sm.label && !SELECT_PLACEHOLDER_LABEL_RE.test(sm.label);
+      const label = (sm.label || '').toString();
+      const val = (sm.value === undefined || sm.value === null) ? '' : sm.value.toString();
+      const isPlaceholder = !label || SELECT_PLACEHOLDER_LABEL_RE.test(label);
+      // Real choice: a non-placeholder label. A non-empty value with no label is also
+      // accepted (defensive: dana could emit value-only options). Only a placeholder,
+      // or an empty value with no usable label, counts as missing.
+      const realChoice = (!isPlaceholder) || (val.trim() !== '' && label.trim() !== '');
       if (!realChoice) missing.push(f);
     } else {
       const v = values[f];
