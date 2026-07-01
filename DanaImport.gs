@@ -317,7 +317,7 @@ function loginToDana_(baseUrl, user, pass, verbose) {
   const pageCode = pageResp.getResponseCode();
   if (verbose) {
     Logger.log('GET ' + loginPageUrl + ' -> HTTP ' + pageCode);
-    Logger.log('Response headers: ' + JSON.stringify(pageResp.getAllHeaders()));
+    Logger.log('Response headers: ' + redactHeadersForLog_(pageResp.getAllHeaders()));
   }
 
   if (pageCode === 403 || pageCode === 503) {
@@ -336,7 +336,7 @@ function loginToDana_(baseUrl, user, pass, verbose) {
   if (verbose) Logger.log('form_build_id: ' + formBuildId);
 
   const initialCookies = extractCookies_(pageResp);
-  if (verbose) Logger.log('Initial cookies: ' + initialCookies);
+  if (verbose) Logger.log('Initial cookies: ' + cookieNames_(initialCookies));
 
   // Step 2: POST credentials
   const postResp = UrlFetchApp.fetch(
@@ -362,7 +362,7 @@ function loginToDana_(baseUrl, user, pass, verbose) {
   const postCode = postResp.getResponseCode();
   if (verbose) {
     Logger.log('POST login -> HTTP ' + postCode);
-    Logger.log('Response headers: ' + JSON.stringify(postResp.getAllHeaders()));
+    Logger.log('Response headers: ' + redactHeadersForLog_(postResp.getAllHeaders()));
   }
 
   // Successful Drupal login = 302 redirect
@@ -380,7 +380,7 @@ function loginToDana_(baseUrl, user, pass, verbose) {
   }
 
   const sessionCookies = extractCookies_(postResp, initialCookies);
-  if (verbose) Logger.log('Session cookies: ' + sessionCookies);
+  if (verbose) Logger.log('Session cookies: ' + cookieNames_(sessionCookies));
 
   // Drupal HTTPS session cookie is SSESS<hash>, HTTP is SESS<hash>
   if (!/(?:^|\s|;)S?SESS[a-f0-9]+=/i.test(sessionCookies)) {
@@ -389,6 +389,24 @@ function loginToDana_(baseUrl, user, pass, verbose) {
       '\nRun testDanaImportLogin (with verbose=true) to debug.');
   }
   return sessionCookies;
+}
+
+// Render a Cookie header string as "name1, name2" - names only, never values, so
+// verbose diagnostics can confirm an SSESS session cookie is present without writing
+// the live session token to the execution log.
+function cookieNames_(cookieHeader) {
+  if (!cookieHeader) return '(none)';
+  return cookieHeader.split(';').map(c => c.trim().split('=')[0]).filter(Boolean).join(', ');
+}
+
+// JSON of response headers with any Set-Cookie value redacted (it carries the raw
+// session token) - for verbose diagnostics only.
+function redactHeadersForLog_(headers) {
+  const out = {};
+  Object.keys(headers || {}).forEach(k => {
+    out[k] = (k.toLowerCase() === 'set-cookie') ? '[REDACTED]' : headers[k];
+  });
+  return JSON.stringify(out);
 }
 
 /**
@@ -519,6 +537,9 @@ function processRows_(data, idx, receiptToDonationId) {
     stats.total++;
 
     if (existing.has(receiptNo)) { stats.skipped++; continue; }
+    // Dedup within this batch too: a receipt repeated inside one XLS would otherwise
+    // insert duplicate PK rows (double-counted amounts, duplicate write-back attempts).
+    existing.add(receiptNo);
 
     const email = idx.email >= 0 ? toStr_(row[idx.email]).toLowerCase() : '';
     const idType = idx.idType >= 0 ? toStr_(row[idx.idType]) : '';

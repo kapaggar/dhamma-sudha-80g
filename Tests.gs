@@ -47,6 +47,13 @@ function runAllTests() {
   assert('short masked as stars', maskPAN('SHORT') === '**********');
   assert('null masked as stars', maskPAN(null) === '**********');
 
+  // decodeHtml_ (write-back field replay; Drupal check_plain entities)
+  assert('Drupal apostrophe entity decoded', decodeHtml_('O&#039;Brien') === "O'Brien");
+  assert('plain &#39; still decoded', decodeHtml_('O&#39;Brien') === "O'Brien");
+  assert('&amp; decoded last, no double-decode', decodeHtml_('a &amp;lt; b') === 'a &lt; b');
+  assert('&amp; decoded', decodeHtml_('Tom &amp; Jerry') === 'Tom & Jerry');
+  assert('&quot; decoded', decodeHtml_('&quot;x&quot;') === '"x"');
+
   Logger.log('');
   Logger.log('=== ' + pass + ' passed, ' + fail + ' failed ===');
 }
