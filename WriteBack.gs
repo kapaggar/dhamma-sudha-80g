@@ -63,14 +63,11 @@ function showWriteBackResult_(r, dryRun) {
 // ---------------------------------------------------------------------------
 
 function writeBackPANs_(dryRun) {
-  const candidates = findWriteBackCandidates_();
-  if (candidates.length === 0) {
-    return { processed: 0, succeeded: 0, failed: 0, skipped: 0, total_candidates: 0 };
-  }
-
-  // Serialize real write-backs: a manual "Push Now" and the hourly trigger both
-  // read candidates then write per-row; running them concurrently could double-POST
-  // the same donation_id. Dry-run does no writes, so it stays lock-free.
+  // Serialize real write-backs BEFORE selecting candidates: a manual "Push Now" and
+  // the hourly trigger both read candidates then write per-row. Selecting before the
+  // lock let a second run that acquired the lock within 30s proceed on a STALE list
+  // (rows the first run had already stamped) and re-POST the same donation_ids.
+  // Dry-run does no writes, so it stays lock-free.
   let lock = null;
   if (!dryRun) {
     lock = LockService.getScriptLock();
@@ -78,7 +75,7 @@ function writeBackPANs_(dryRun) {
       lock.waitLock(30000);
     } catch (lockErr) {
       return {
-        total_candidates: candidates.length,
+        total_candidates: 0,
         processed: 0, succeeded: 0, failed: 0, skipped: 0,
         circuit_break: 'Another write-back is already running (could not acquire lock).'
       };
@@ -86,6 +83,11 @@ function writeBackPANs_(dryRun) {
   }
 
   try {
+    const candidates = findWriteBackCandidates_();
+    if (candidates.length === 0) {
+      return { processed: 0, succeeded: 0, failed: 0, skipped: 0, total_candidates: 0 };
+    }
+
     const batch = candidates.slice(0, WRITEBACK_MAX_PER_RUN);
     Logger.log('Writeback: ' + candidates.length + ' eligible, processing ' + batch.length);
 
@@ -93,10 +95,16 @@ function writeBackPANs_(dryRun) {
     const user    = PropertiesService.getScriptProperties().getProperty('DANA_USER');
     const pass    = _readProp('DANA_PASS');
 
-    const sessionCookie = loginToDana_(baseUrl, user, pass, false);
+    // Only touch the live portal when necessary: a real push always needs a session;
+    // a dry run needs one only to look up missing donation_ids. Keeps Preview usable
+    // while Cloudflare is blocking logins.
+    const needLookup = batch.filter(c => !c.donationId);
+    let sessionCookie = null;
+    if (!dryRun || needLookup.length > 0) {
+      sessionCookie = loginToDana_(baseUrl, user, pass, false);
+    }
 
     // For rows missing donation_id, try to look it up from dana now
-    const needLookup = batch.filter(c => !c.donationId);
     if (needLookup.length > 0) {
       Logger.log(needLookup.length + ' rows missing donation_id - fetching from dana');
       const lookedUp = fetchDonationIdsForCandidates_(baseUrl, sessionCookie, needLookup);
@@ -117,12 +125,27 @@ function writeBackPANs_(dryRun) {
         continue;
       }
 
+      // Pre-flight: never POST a malformed d_id_no into dana. pan_collected can be
+      // non-PAN via import (dana's id_value is copied unvalidated when id_type=PAN,
+      // then auto-filled onto repeat-donor rows) or via hand edits to the sheet.
+      const pv = validateAndNormalizePAN(c.pan);
+      if (!pv.valid) {
+        Logger.log('SKIP ' + c.receiptNo + ' - pan_collected fails PAN format check');
+        if (!dryRun) {
+          auditLog(ss, 'writeBack', 'dana_update_skipped',
+            c.receiptNo, 'pan_collected', '', 'SKIP: pan_collected is not a valid PAN format', c.donationId);
+        }
+        skipped++;
+        consec = 0;
+        continue;
+      }
+
       if (dryRun) {
         // Dry-run is sheet-only (no dana GET), so it reflects the imported snapshot.
         // The live "already PAN in dana" and required-field checks run on a real push.
         Logger.log('[DRY RUN] Would attempt donation_id=' + c.donationId +
           ' receipt=' + c.receiptNo +
-          ' (' + c.currentIdType + ' -> PAN ' + maskPAN(c.pan) +
+          ' (' + c.currentIdType + ' -> PAN ' + maskPAN(pv.pan) +
           '); live dana state verified at push time');
         succeeded++;
         consec = 0;
@@ -130,7 +153,7 @@ function writeBackPANs_(dryRun) {
       }
 
       try {
-        updateDonationSlip_(baseUrl, sessionCookie, c.donationId, c.pan);
+        updateDonationSlip_(baseUrl, sessionCookie, c.donationId, pv.pan);
 
         // Mark in sheet: column Y = dana_donation_id, Z = dana_updated_at
         sheet.getRange(c.rowIndex, 25).setValue(c.donationId);
@@ -139,7 +162,7 @@ function writeBackPANs_(dryRun) {
         auditLog(ss, 'writeBack', 'dana_updated',
           c.receiptNo, 'd_id_type+d_id_no',
           c.currentIdType + ':' + (c.currentIdValue || ''),
-          'PAN:' + maskPAN(c.pan),
+          'PAN:' + maskPAN(pv.pan),
           c.donationId);
 
         succeeded++;
@@ -355,7 +378,14 @@ function postDonationEdit_(baseUrl, sessionCookie, donationId, newPan) {
   // snapshot from import time). If the PAN was added directly in the portal after
   // our last import, dana already shows PAN here - skip the redundant write and let
   // the caller mark the row done so it is never revisited.
-  if ((values.d_id_type || '').toString().trim() === DANA_ID_TYPE_PAN) {
+  // Trust only an EXPLICIT selection: for a select rendered with no `selected`
+  // attribute, values.d_id_type is the first-option browser default (see
+  // extractFormValues_), and if PAN happens to be the first option that default
+  // would falsely mark every row ALREADY_PAN - stamping it done WITHOUT writing.
+  // In that ambiguous case, proceed with the (idempotent) write instead.
+  const idTypeMeta = (values.__selectMeta || {}).d_id_type;
+  if ((values.d_id_type || '').toString().trim() === DANA_ID_TYPE_PAN &&
+      (!idTypeMeta || idTypeMeta.hasExplicitSelected)) {
     throw new Error('ALREADY_PAN: dana already has id_type=PAN for this donation (updated in the portal) - no write needed.');
   }
 
@@ -571,14 +601,19 @@ function findEmptyRequiredFields_(values) {
 }
 
 function decodeHtml_(s) {
+  // Drupal 7 check_plain emits &amp; &quot; &#039; &lt; &gt;. The apostrophe form is
+  // &#039; (leading zero) - missing it re-POSTed "O&#039;Brien" back into dana,
+  // corrupting names/addresses on every write-back. &amp; must decode LAST or
+  // "&amp;lt;" double-decodes to "<" instead of the literal "&lt;".
   if (!s) return '';
   return s.toString()
-    .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'");
+    .replace(/&#0*39;/g, "'")
+    .replace(/&#x0*27;/gi, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
 }
 
 // ---------------------------------------------------------------------------
@@ -669,16 +704,49 @@ function diagnoseDanaWriteBack(donationId, doPost) {
   let post = null;
   if (doPost) {
     // Mirror the real write-back overrides, but DO NOT touch the sheet.
-    const probe = postDonationEdit_(baseUrl, cookie, donationId, 'ABCDE1234F'); // dummy PAN, redacted in logs
-    post = { code: probe.code, body: sanitizeDanaError_(probe.body) };
-    Logger.log('POST probe -> HTTP ' + probe.code + ' :: ' + post.body);
-    Logger.log('NOTE: probe used a DUMMY PAN and did not update the sheet. Re-run a real push to persist.');
+    // Probe with the row's REAL collected PAN, never a dummy: a successful dummy
+    // POST would write the fake PAN into the live portal, and the next real push
+    // would then see id_type=PAN (ALREADY_PAN), stamp the row done, and lock the
+    // bogus value in. No valid pan_collected -> refuse the probe.
+    const realPan = findCollectedPanForDonationId_(donationId);
+    const pv = validateAndNormalizePAN(realPan);
+    if (!pv.valid) {
+      post = { code: 0, body: 'probe refused: no valid pan_collected in donors_input for this donation_id' };
+      Logger.log('POST probe refused: no valid pan_collected for donation_id=' + donationId);
+    } else {
+      try {
+        const probe = postDonationEdit_(baseUrl, cookie, donationId, pv.pan);
+        post = { code: probe.code, body: sanitizeDanaError_(probe.body) };
+        Logger.log('POST probe -> HTTP ' + probe.code + ' :: ' + post.body);
+        Logger.log('NOTE: probe POSTed the row\'s real PAN but did not update the sheet. Run a real push to stamp dana_updated_at.');
+      } catch (err) {
+        // ALREADY_PAN / SKIP / token failures from the probe ARE the diagnosis.
+        post = { code: 0, body: maskPanInText_(err.message).substring(0, 300) };
+        Logger.log('POST probe threw: ' + post.body);
+      }
+    }
   }
 
   return {
     ok: true, donationId: donationId, fieldCount: names.length,
     unselectedSelects: unselected, emptyFields: blanks, post: post
   };
+}
+
+// pan_collected (col S) of the donors_input row whose dana_donation_id (col Y)
+// matches, or '' if no such row. Used by the diagnostic POST probe only.
+function findCollectedPanForDonationId_(donationId) {
+  const sheet = getSpreadsheet().getSheetByName('donors_input');
+  if (!sheet || sheet.getLastRow() < 2) return '';
+  const data = sheet.getDataRange().getValues();
+  const want = (donationId == null ? '' : donationId).toString().trim();
+  if (!want) return '';
+  for (let i = 1; i < data.length; i++) {
+    if ((data[i][24] || '').toString().trim() === want && data[i][18]) {
+      return data[i][18].toString();
+    }
+  }
+  return '';
 }
 
 // Menu wrapper: prompt for a donation_id and run the GET-only field dump.

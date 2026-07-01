@@ -199,7 +199,12 @@ function sendReminders() {
     const count = parseInt(reminderCount) || 0;
     if (count >= 2) continue;
 
-    const lastContact = lastReminderAt ? new Date(lastReminderAt) : new Date(sentAt);
+    // A row whose initial send FAILED has an empty sent_at; new Date('') is Invalid
+    // Date, daysSince goes NaN, every "< threshold" check is false, and the donor
+    // would get a "reminder" for an email that never arrived. The initial-send flow
+    // still owns the retry for such rows - reminders must not touch them.
+    const lastContact = lastReminderAt ? new Date(lastReminderAt) : (sentAt ? new Date(sentAt) : null);
+    if (!lastContact || isNaN(lastContact.getTime())) continue;
     const daysSince = (now - lastContact) / 86400000;
     const threshold = count === 0 ? 3 : 7;
     if (daysSince < threshold) continue;
