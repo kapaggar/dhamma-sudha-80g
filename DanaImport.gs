@@ -214,8 +214,21 @@ function runDanaImport_(startDate, endDate) {
   const sessionCookie3 = extractCookies_(postResp, sessionCookie2);
 
   // Parse receipt_no -> donation_id from edit links in the HTML response
-  const receiptToDonationId = parseReceiptToDonationIdMap_(postResp.getContentText());
+  const reportHtml = postResp.getContentText();
+  const receiptToDonationId = parseReceiptToDonationIdMap_(reportHtml);
   Logger.log('Parsed ' + Object.keys(receiptToDonationId).length + ' receipt -> donation_id mappings');
+
+  // No donation rows in the range -> dana's excel export 500s on an empty result
+  // set (Drupal 7 error page). Skip the fetch and record a clean zero-row import.
+  // Keyed off edit links (every report row carries one), NOT the receipt map, so a
+  // mapping-heuristic regression cannot silently skip a real import.
+  if (!/\/donation\/edit\/\d+/.test(reportHtml)) {
+    Logger.log('No donation records in range ' + startDate + ' to ' + endDate + ' - skipping excel fetch');
+    const empty = { total: 0, added: 0, skipped: 0, needPan: 0, havePan: 0, autoFilled: 0, noEmail: 0,
+      startDate: startDate, endDate: endDate };
+    logImport_(startDate, endDate, empty);
+    return empty;
+  }
 
   // Step 3: GET the excel export with full param set (matches the link in the HTML)
   const reportUrl = baseUrl + '/donation-report/excel' +
