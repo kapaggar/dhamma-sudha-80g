@@ -23,7 +23,7 @@ clasp login                # one-time auth
 - Drive API v2 advanced service must be enabled in the editor (Services → Drive API v2).
 - Triggers (hourly write-back, reminders, monthly import) are installed via the `80G Admin` menu / editor Triggers, not in code at startup.
 - Tests: run `runAllTests` from the editor (PAN + token logic only; no live dana/network tests exist).
-- **After any commit that changes code or docs, run `graphify update .` from the repo root** to refresh the knowledge graph in `graphify-out/` (gitignored). Incremental and free — only re-analyzes changed files. Never delete `graphify-out/cache/` (it's what makes updates cost 0 API tokens). For orientation, read `graphify-out/GRAPH_REPORT.md` (~6 KB whole-repo summary) before reading raw `.gs` files; it records the commit it was built from, so check staleness against `git rev-parse HEAD`. Details: `docs/GRAPHIFY.md`.
+- **After any commit that changes code, run `graphify update .` from the repo root** to refresh the knowledge graph in `graphify-out/` (gitignored). Incremental and free — only re-analyzes changed files. For doc-only commits, use `/graphify --update` in an AI assistant session instead (LLM pass; code-only update won't pick up markdown semantics). Never delete `graphify-out/cache/` (it's what makes updates cost 0 API tokens). For orientation, read `graphify-out/GRAPH_REPORT.md` (~6 KB whole-repo summary) before reading raw `.gs` files; it records the commit it was built from, so check staleness against `git rev-parse HEAD`. Details: `docs/GRAPHIFY.md`.
 
 ## File map
 
