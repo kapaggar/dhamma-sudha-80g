@@ -19,10 +19,14 @@ contains dated snapshots, a token-cost log, and an incremental cache).
 ## Daily usage
 
 ```bash
-graphify update .        # after code/doc changes; incremental, no API cost
+graphify update .        # after code changes; incremental, no API cost (no LLM)
 graphify query <topic>   # explore the graph interactively
 open graphify-out/graph.html   # visual graph
 ```
+
+For **doc/markdown/image changes**, `graphify update .` only re-extracts code — run
+`/graphify --update` inside an AI assistant session to refresh the semantic layer
+(this one does use LLM tokens, still incremental via the cache).
 
 Check freshness: `GRAPH_REPORT.md` records the commit it was built from — compare with
 `git rev-parse HEAD`.
