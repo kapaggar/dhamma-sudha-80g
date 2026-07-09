@@ -1,0 +1,14 @@
+# Graphify exclusions — keep analysis focused on code/docs and cheap on tokens
+
+# Graphify's own output (never self-analyze)
+graphify-out/
+
+# VCS / tooling
+.git/
+.claude/
+.clasp.json
+
+# Dependencies / env (never analyze; may contain secrets)
+node_modules/
+.env
+*.env
