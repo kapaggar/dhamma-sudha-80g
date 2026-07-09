@@ -100,8 +100,12 @@ dhamma-sudha-80g/
 ├── Form.html          Donor-facing PAN submission form (Apps Script Web App template)
 ├── ImportDialog.html  Admin modal for date-range dana import (shown via showModalDialog)
 ├── appsscript.json    Project manifest: scopes, Drive API advanced service, V8 runtime
+├── .graphifyignore    Files excluded from the graphify knowledge graph
 └── docs/
-    └── ARCHITECTURE.md  Full architecture reference
+    ├── ARCHITECTURE.md  Full architecture reference
+    └── GRAPHIFY.md      Code knowledge graph: setup, usage, token economics
+
+(untracked: graphify-out/ — generated knowledge graph output, gitignored)
 ```
 
 ---
@@ -417,6 +421,19 @@ Function dropdown → `testDanaImportLogin` → Run → View → Logs
 
 Expected output: `=== LOGIN OK === Cookie length: NNN Cookie names: SSESS620a...`
 
+### Refresh the Code Knowledge Graph (graphify)
+
+A semantic knowledge graph of this repo lives in `graphify-out/` (gitignored, rebuildable).
+After code or doc changes, refresh it — incremental and free (no API tokens):
+
+```bash
+graphify update .
+```
+
+See [docs/GRAPHIFY.md](docs/GRAPHIFY.md) for setup, token economics, and the
+fresh-machine setup prompt. Never delete `graphify-out/cache/` — it's what makes
+updates cost 0 tokens.
+
 ---
 
 ## Configuration and Environment Variables
@@ -670,6 +687,8 @@ The entire system runs on Google Apps Script + Google Sheets. No servers, no hos
 3. Run `testDanaImportLogin` to verify dana credentials still work
 4. Run `previewWriteBackToDana` (dry run) before any real write-back
 5. Check Apps Script Execution Log (left sidebar, clock icon) for any errors
+6. After committing, run `graphify update .` from the repo root to keep the
+   knowledge graph fresh (incremental, no API cost — see [docs/GRAPHIFY.md](docs/GRAPHIFY.md))
 
 ### Credential Rotation
 
