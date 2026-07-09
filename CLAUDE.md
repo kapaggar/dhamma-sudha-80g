@@ -23,6 +23,7 @@ clasp login                # one-time auth
 - Drive API v2 advanced service must be enabled in the editor (Services → Drive API v2).
 - Triggers (hourly write-back, reminders, monthly import) are installed via the `80G Admin` menu / editor Triggers, not in code at startup.
 - Tests: run `runAllTests` from the editor (PAN + token logic only; no live dana/network tests exist).
+- **After any commit that changes code or docs, run `graphify update .` from the repo root** to refresh the knowledge graph in `graphify-out/` (gitignored). Incremental and free — only re-analyzes changed files. Never delete `graphify-out/cache/` (it's what makes updates cost 0 API tokens). For orientation, read `graphify-out/GRAPH_REPORT.md` (~6 KB whole-repo summary) before reading raw `.gs` files; it records the commit it was built from, so check staleness against `git rev-parse HEAD`. Details: `docs/GRAPHIFY.md`.
 
 ## File map
 
@@ -37,6 +38,7 @@ clasp login                # one-time auth
 | `Admin.gs` | `onOpen` menu, `refreshAdminReview`, `exportReadyFor80G` |
 | `Tests.gs` | Unit tests |
 | `Form.html` / `ImportDialog.html` | Donor PAN form / admin import modal |
+| `docs/GRAPHIFY.md` | Knowledge-graph tooling: setup prompt, `graphify update .` workflow, token economics |
 
 Sheets: `donors_input` (26 cols A–Z, PK `receipt_no`), `submissions`, `email_log`, `audit_log`, `import_log`, `wa_log`, `wa_nudge_log`, `ready_for_80g`. Column layout in README → Data Model.
 
