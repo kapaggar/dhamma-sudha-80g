@@ -2,3 +2,6 @@ node_modules/
 WHATSAPP_SETUP.md
 .env
 *.env
+
+# Graphify generated output (rebuildable; cache + dated snapshots)
+graphify-out/
