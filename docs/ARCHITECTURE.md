@@ -232,6 +232,9 @@ All triggers are installed at runtime, not defined in code at deploy-time.
 | Monthly import | `autoImportMonthly` | Manual (Apps Script Triggers UI) |
 | Daily reminders | `sendReminders` | Manual (Apps Script Triggers UI) |
 | Hourly PAN push | `autoWriteBackHourly` | `80G Admin → Enable Hourly Auto-Push` |
+| Donation Day 10-min tick | `donationDayTick` | `80G Admin → 5. Donation Day → Enable` |
+
+**Donation Day mode** (`DonationDay.gs`): the tick runs import → pending emails → WhatsApp nudges every 10 minutes and self-expires 3 hours after enable (expiry stored in the `DONATION_DAY_UNTIL` Script Property; past it, the tick uninstalls its own trigger, clears the property, audit-logs `donation_day_auto_off`, and emails the admin). Enabling removes the hourly `autoSendEmailsHourly` / `autoSendWhatsAppNudgeHourly` triggers for the window — neither send path takes a lock, so an hourly run overlapping a tick could double-send. They are not auto-restored; re-enable them from menus 2 and 4 afterwards if a backlog remains. Within the tick, sends run under `LockService` `tryLock(0)` (skipped if busy) while import runs lock-free (idempotent via `receipt_no` dedup), so a tick never starves `submitForm`'s 20s `waitLock` during peak donor traffic.
 
 ## Performance Notes
 

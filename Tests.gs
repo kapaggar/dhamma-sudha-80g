@@ -47,6 +47,14 @@ function runAllTests() {
   assert('short masked as stars', maskPAN('SHORT') === '**********');
   assert('null masked as stars', maskPAN(null) === '**********');
 
+  // Donation Day expiry predicate (pure, injected now)
+  var now = Date.now();
+  assert('future expiry not expired', donationDayExpired_(new Date(now + 60000).toISOString(), now) === false);
+  assert('past expiry expired', donationDayExpired_(new Date(now - 60000).toISOString(), now) === true);
+  assert('null expiry expired', donationDayExpired_(null, now) === true);
+  assert('empty expiry expired', donationDayExpired_('', now) === true);
+  assert('malformed expiry expired', donationDayExpired_('not-a-date', now) === true);
+
   // decodeHtml_ (write-back field replay; Drupal check_plain entities)
   assert('Drupal apostrophe entity decoded', decodeHtml_('O&#039;Brien') === "O'Brien");
   assert('plain &#39; still decoded', decodeHtml_('O&#39;Brien') === "O'Brien");

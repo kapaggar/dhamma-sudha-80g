@@ -485,6 +485,7 @@ Installed via the Admin menu (not in code directly):
 - **Monthly auto-import:** Apps Script Triggers → `autoImportMonthly` → Day timer, set preferred time
 - **Daily reminders:** Apps Script Triggers → `sendReminders` → Day timer, 9-10am IST
 - **Hourly PAN push:** `80G Admin → 3. Push PAN to Dana → Enable Hourly Auto-Push`
+- **Donation Day mode:** `80G Admin → 5. Donation Day → Enable (3h, every 10 min)` — for donation-day events. Every 10 minutes it imports new donations from dana, sends pending PAN-request emails, and sends WhatsApp email-nudges. It turns itself off after 3 hours (or use "Disable Now"). Enabling removes the hourly email/nudge triggers to avoid double-sends; re-enable them from menus 2 and 4 afterwards if a backlog remains. "Status" shows whether the mode is on and when it expires.
 
 Triggers must be installed once after any new deployment. They survive re-deployments.
 
