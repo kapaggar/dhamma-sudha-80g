@@ -20,7 +20,7 @@ clasp push                 # push code; runs immediately for non-web-app functio
 clasp login                # one-time auth
 ```
 - Web-app changes (`Code.gs` doGet/submitForm, `Form.html`): `clasp push` then Apps Script editor → Deploy → Manage deployments → New version. URL is stable across versions.
-- Drive API v2 advanced service must be enabled in the editor (Services → Drive API v2).
+- No Drive advanced service and no `DriveApp` — both demand the full `drive` scope. Temp XLS→Sheet conversion goes through the Drive REST API (`driveCreateSheetFromBlob_`/`driveDeleteFile_` in `DanaImport.gs`) under the narrow `drive.file` scope. `UrlFetchApp` is pinned by `urlFetchWhitelist` in `appsscript.json`; new hosts must be added there.
 - Triggers (hourly write-back, reminders, monthly import) are installed via the `80G Admin` menu / editor Triggers, not in code at startup. Donation Day mode (menu 5) installs a 10-min `donationDayTick` trigger that self-expires after 3h (`DONATION_DAY_UNTIL` Script Property) and removes the hourly email/nudge triggers at enable (not auto-restored).
 - Tests: run `runAllTests` from the editor (PAN + token logic only; no live dana/network tests exist).
 - **After any commit that changes code, refresh the knowledge graph** in `graphify-out/` (gitignored). ⚠️ Do NOT run the bare `graphify update .` CLI here — stock graphify doesn't recognise `.gs` and silently drops every Apps Script file from the graph. Rebuild via the graphify skill pipeline with the `.gs` runtime patch applied (`CODE_EXTENSIONS.add('.gs')` + `_DISPATCH['.gs'] = _DISPATCH['.js']`); see `docs/DECISIONS.md` → graphify entry. Incremental and free — only re-analyzes changed files. For doc-only commits, use `/graphify --update` in an AI assistant session instead (LLM pass; code-only update won't pick up markdown semantics). Never delete `graphify-out/cache/` (it's what makes updates cost 0 API tokens). For orientation, read `graphify-out/GRAPH_REPORT.md` (~6 KB whole-repo summary) before reading raw `.gs` files; it records the commit it was built from, so check staleness against `git rev-parse HEAD`. Details: `docs/GRAPHIFY.md`.
@@ -38,7 +38,7 @@ clasp login                # one-time auth
 | `Admin.gs` | `onOpen` menu, `refreshAdminReview`, `exportReadyFor80G` |
 | `DonationDay.gs` | Donation Day mode: 10-min tick (import → emails → WA nudges), self-expires after 3h |
 | `Tests.gs` | Unit tests |
-| `Form.html` / `ImportDialog.html` | Donor PAN form / admin import modal |
+| `Form.html` / `ImportDialog.html` / `UploadDialog.html` | Donor PAN form / admin import modal / XLS upload fallback modal |
 | `docs/GRAPHIFY.md` | Knowledge-graph tooling: setup prompt, `graphify update .` workflow, token economics |
 | `docs/DECISIONS.md` | Running log of non-obvious decisions & design patterns (read before changing trigger/send logic) |
 

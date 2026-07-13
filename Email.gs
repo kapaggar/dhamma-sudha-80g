@@ -363,7 +363,7 @@ function autoSendEmailsHourly() {
   } catch (err) {
     Logger.log('autoSendEmailsHourly failed: ' + err.message);
     try {
-      const adminEmail = Session.getActiveUser().getEmail();
+      const adminEmail = getAdminEmail_();
       if (adminEmail) {
         MailApp.sendEmail(adminEmail,
           '[80G System] Hourly email sending failed',

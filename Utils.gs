@@ -1,6 +1,16 @@
 // Utils.gs
 
 /**
+ * Recipient for trigger-failure alert emails. Reads the ADMIN_EMAIL Script
+ * Property; returns '' (alert silently skipped) when unset. Replaces
+ * Session.getActiveUser() so the manifest doesn't need the userinfo.email scope.
+ */
+function getAdminEmail_() {
+  const email = PropertiesService.getScriptProperties().getProperty('ADMIN_EMAIL');
+  return email ? email.trim() : '';
+}
+
+/**
  * Generate a signed token for email.
  * One donor = one form link = one token (regardless of how many donations).
  */

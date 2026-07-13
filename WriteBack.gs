@@ -34,7 +34,7 @@ function autoWriteBackHourly() {
     Logger.log('autoWriteBackHourly: ' + JSON.stringify(result));
   } catch (err) {
     Logger.log('autoWriteBackHourly failed: ' + err.message);
-    const adminEmail = Session.getActiveUser().getEmail();
+    const adminEmail = getAdminEmail_();
     if (adminEmail) {
       try {
         MailApp.sendEmail(adminEmail,

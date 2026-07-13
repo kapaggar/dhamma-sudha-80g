@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <base target="_top">
+  <style>
+    body{font-family:Arial,sans-serif;padding:16px;margin:0;font-size:13px;color:#333}
+    h3{margin:0 0 12px 0;color:#3c6e47}
+    .info{background:#eef4ee;padding:8px 12px;border-radius:4px;margin-bottom:14px;font-size:12px;color:#555}
+    input[type=file]{width:100%;font-size:13px;margin-bottom:12px}
+    .actions{margin-top:16px;text-align:right}
+    button{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:13px;margin-left:8px}
+    .primary{background:#3c6e47;color:#fff}
+    .primary:hover{background:#2e5538}
+    .primary:disabled{background:#aaa;cursor:default}
+    .secondary{background:#eee;color:#333}
+    .status{margin-top:14px;padding:10px;border-radius:4px;font-size:12px;display:none;white-space:pre-line}
+    .status.ok{background:#d9ead3;color:#2d6a2d;display:block}
+    .status.err{background:#f4cccc;color:#9b1c1c;display:block}
+    .status.loading{background:#fff3cd;color:#856404;display:block}
+  </style>
+</head>
+<body>
+  <h3>Import XLS from Computer</h3>
+  <div class="info">
+    Download the XLS report from the dana portal, then choose it here.
+  </div>
+  <input type="file" id="file" accept=".xls,.xlsx">
+  <div class="actions">
+    <button class="secondary" onclick="google.script.host.close()">Cancel</button>
+    <button class="primary" id="goBtn" onclick="runImport()">Import</button>
+  </div>
+  <div class="status" id="status"></div>
+
+<script>
+  var MAX_BYTES = 10 * 1024 * 1024;
+
+  function runImport() {
+    var input = document.getElementById('file');
+    if (!input.files || !input.files.length) {
+      showStatus('err', 'Please choose a file.'); return;
+    }
+    var file = input.files[0];
+    if (file.size > MAX_BYTES) {
+      showStatus('err', 'File too large (max 10 MB).'); return;
+    }
+    showStatus('loading', 'Importing... this may take 30-60 seconds.');
+    document.getElementById('goBtn').disabled = true;
+
+    var reader = new FileReader();
+    reader.onload = function() {
+      var base64 = reader.result.split(',')[1];
+      google.script.run
+        .withSuccessHandler(function(res) {
+          if (res.success) {
+            var r = res.result;
+            showStatus('ok',
+              'Done.\n' +
+              'Total: ' + r.total + '  |  Added: ' + r.added + '  |  Skipped: ' + r.skipped + '\n' +
+              'Need PAN: ' + r.needPan + '  |  Have PAN: ' + r.havePan + '  |  Auto-filled: ' + r.autoFilled);
+            document.getElementById('goBtn').textContent = 'Close';
+            document.getElementById('goBtn').onclick = function() { google.script.host.close(); };
+            document.getElementById('goBtn').disabled = false;
+          } else {
+            showStatus('err', res.error);
+            document.getElementById('goBtn').disabled = false;
+          }
+        })
+        .withFailureHandler(function(err) {
+          showStatus('err', err.message || 'Unknown error');
+          document.getElementById('goBtn').disabled = false;
+        })
+        .runUploadImport(base64, file.name);
+    };
+    reader.onerror = function() {
+      showStatus('err', 'Could not read the file.');
+      document.getElementById('goBtn').disabled = false;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function showStatus(type, msg) {
+    var s = document.getElementById('status');
+    s.className = 'status ' + type;
+    s.textContent = msg;
+  }
+</script>
+</body>
+</html>

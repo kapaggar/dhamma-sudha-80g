@@ -447,7 +447,7 @@ function autoSendWhatsAppHourly() {
   } catch (err) {
     Logger.log('autoSendWhatsAppHourly failed: ' + err.message);
     try {
-      const adminEmail = Session.getActiveUser().getEmail();
+      const adminEmail = getAdminEmail_();
       if (adminEmail) {
         MailApp.sendEmail(adminEmail,
           '[80G System] Hourly WhatsApp sending failed',
@@ -523,7 +523,7 @@ function autoSendWhatsAppNudgeHourly() {
   } catch (err) {
     Logger.log('autoSendWhatsAppNudgeHourly failed: ' + err.message);
     try {
-      const adminEmail = Session.getActiveUser().getEmail();
+      const adminEmail = getAdminEmail_();
       if (adminEmail) {
         MailApp.sendEmail(adminEmail,
           '[80G System] Hourly WhatsApp nudge failed',

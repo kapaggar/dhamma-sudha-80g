@@ -1,7 +1,6 @@
 // DanaImport.gs
 // Pulls donation reports from the dana portal, parses, dedups, appends to donors_input.
 //
-// Requires: enable "Drive API" advanced service
 // Requires Script Properties: DANA_URL, DANA_USER, DANA_PASS
 
 // Reads a Script Property and base64-decodes it. Avoids plaintext in the
@@ -65,13 +64,13 @@ function autoImportMonthly() {
     }
   } catch (err) {
     Logger.log('autoImportMonthly failed: ' + err.message);
-    const adminEmail = Session.getActiveUser().getEmail();
+    const adminEmail = getAdminEmail_();
     if (adminEmail) {
       try {
         MailApp.sendEmail(adminEmail,
           '[80G System] Dana auto-import failed',
           'Error: ' + err.message + '\n\nCheck the Apps Script execution log.\n' +
-          'Fallback: 80G Admin > Import from Uploaded XLS File');
+          'Fallback: 80G Admin > Import XLS from Computer');
       } catch (_) {}
     }
     throw err;
@@ -79,38 +78,90 @@ function autoImportMonthly() {
 }
 
 /**
- * Fallback when Cloudflare blocks: user downloads XLS from dana, uploads to Drive,
- * pastes the file ID.
+ * Fallback when Cloudflare blocks: user downloads XLS from dana and uploads it
+ * through this dialog. The file is sent as base64 and the script creates the
+ * temp conversion itself, so the narrow drive.file scope is enough (no access
+ * to pre-existing Drive files).
  */
-function importFromUploadedFile() {
-  const ui = SpreadsheetApp.getUi();
-  const r = ui.prompt('Import from Uploaded File',
-    'Paste the Google Drive file ID of the dana XLS export.\n\n' +
-    '(Open the file in Drive, copy ID from URL between /d/ and /view)',
-    ui.ButtonSet.OK_CANCEL);
-  if (r.getSelectedButton() !== ui.Button.OK) return;
-  const fileId = r.getResponseText().trim();
-  if (!fileId) return;
+function importXlsFromComputer() {
+  const html = HtmlService.createTemplateFromFile('UploadDialog')
+    .evaluate().setWidth(420).setHeight(300);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Import XLS from Computer');
+}
 
+/**
+ * Called from UploadDialog.html with the XLS file contents as base64.
+ */
+function runUploadImport(base64Data, filename) {
   try {
-    const result = processXlsFile_(fileId, false, {});
-    showImportResult_(result, 'uploaded file');
+    const blob = Utilities.newBlob(
+      Utilities.base64Decode(base64Data),
+      'application/vnd.ms-excel',
+      filename || 'dana_upload.xls');
+    const tempId = driveCreateSheetFromBlob_(blob);
+    try {
+      const result = processXlsFile_(tempId, {});
+      return { success: true, result: result };
+    } finally {
+      driveDeleteFile_(tempId);
+    }
   } catch (err) {
-    ui.alert('Import failed: ' + err.message);
     Logger.log(err.stack);
+    return { success: false, error: err.message };
   }
 }
 
-function showImportResult_(result, source) {
-  SpreadsheetApp.getUi().alert(
-    'Import complete (' + source + ').\n\n' +
-    'Total rows:         ' + result.total + '\n' +
-    'New rows added:     ' + result.added + '\n' +
-    'Skipped (existing): ' + result.skipped + '\n' +
-    'Need PAN:           ' + result.needPan + '\n' +
-    'Have PAN (dana):    ' + result.havePan + '\n' +
-    'Auto-filled (repeat donors): ' + result.autoFilled + '\n' +
-    'No email:           ' + result.noEmail);
+// ---------------------------------------------------------------------------
+// Drive REST helpers
+// ---------------------------------------------------------------------------
+// The Drive advanced service and DriveApp both refuse to run under the narrow
+// drive.file scope ("Required permissions: .../auth/drive"), so temp-file
+// create/delete goes through the Drive REST API, which accepts drive.file for
+// files this script creates. https://www.googleapis.com/ must stay in
+// urlFetchWhitelist.
+
+/** Uploads an XLS blob converted to a Google Sheet; returns the new file id. */
+function driveCreateSheetFromBlob_(blob) {
+  const boundary = 'gs_form_boundary_' + new Date().getTime();
+  const metadata = {
+    name: blob.getName() || 'dana_temp.xls',
+    mimeType: 'application/vnd.google-apps.spreadsheet'
+  };
+  const head = '--' + boundary + '\r\n' +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    JSON.stringify(metadata) + '\r\n' +
+    '--' + boundary + '\r\n' +
+    'Content-Type: ' + (blob.getContentType() || 'application/vnd.ms-excel') + '\r\n\r\n';
+  const tail = '\r\n--' + boundary + '--';
+  const payload = Utilities.newBlob(head).getBytes()
+    .concat(blob.getBytes())
+    .concat(Utilities.newBlob(tail).getBytes());
+
+  const resp = UrlFetchApp.fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+    {
+      method: 'post',
+      contentType: 'multipart/related; boundary=' + boundary,
+      payload: payload,
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    });
+  if (resp.getResponseCode() !== 200) {
+    throw new Error('XLS to Sheet conversion failed: HTTP ' + resp.getResponseCode() +
+      ' ' + resp.getContentText().substring(0, 300));
+  }
+  return JSON.parse(resp.getContentText()).id;
+}
+
+/** Permanently deletes a temp file this script created. Never throws. */
+function driveDeleteFile_(fileId) {
+  try {
+    UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId), {
+      method: 'delete',
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    });
+  } catch (_) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -263,53 +314,32 @@ function runDanaImport_(startDate, endDate) {
   const ct = (reportResp.getHeaders()['Content-Type'] || '').toLowerCase();
   if (ct.indexOf('html') >= 0) {
     throw new Error('Got HTML instead of XLS. Likely Cloudflare/auth issue. ' +
-      'Try: 80G Admin > Import from Uploaded XLS File');
+      'Try: 80G Admin > Import XLS from Computer');
   }
 
   const blob = reportResp.getBlob().setName('dana_import_' + new Date().getTime() + '.xls');
-  const tempFile = Drive.Files.insert(
-    { title: blob.getName(), mimeType: MimeType.GOOGLE_SHEETS },
-    blob
-  );
+  const tempId = driveCreateSheetFromBlob_(blob);
 
   try {
-    const result = processXlsFile_(tempFile.id, true, receiptToDonationId);
+    const result = processXlsFile_(tempId, receiptToDonationId);
     result.startDate = startDate;
     result.endDate = endDate;
     logImport_(startDate, endDate, result);
     return result;
   } finally {
-    try { DriveApp.getFileById(tempFile.id).setTrashed(true); } catch (_) {}
+    driveDeleteFile_(tempId);
   }
 }
 
-function processXlsFile_(fileId, isAlreadyGoogleSheet, receiptToDonationId) {
-  let sheetId = fileId;
-  let cleanup = false;
-
-  if (!isAlreadyGoogleSheet) {
-    const sourceFile = DriveApp.getFileById(fileId);
-    const blob = sourceFile.getBlob();
-    const converted = Drive.Files.insert(
-      { title: 'dana_temp_' + new Date().getTime(), mimeType: MimeType.GOOGLE_SHEETS },
-      blob
-    );
-    sheetId = converted.id;
-    cleanup = true;
-  }
-
-  try {
-    const ss = SpreadsheetApp.openById(sheetId);
-    const sheet = ss.getSheets()[0];
-    const data = sheet.getDataRange().getValues();
-    if (data.length < 2) throw new Error('Report is empty.');
-    const headerMap = mapColumns_(data[0]);
-    return processRows_(data, headerMap, receiptToDonationId || {});
-  } finally {
-    if (cleanup) {
-      try { DriveApp.getFileById(sheetId).setTrashed(true); } catch (_) {}
-    }
-  }
+// sheetId must be a Google Sheet the script itself created (drive.file scope
+// only grants access to app-created files).
+function processXlsFile_(sheetId, receiptToDonationId) {
+  const ss = SpreadsheetApp.openById(sheetId);
+  const sheet = ss.getSheets()[0];
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) throw new Error('Report is empty.');
+  const headerMap = mapColumns_(data[0]);
+  return processRows_(data, headerMap, receiptToDonationId || {});
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +365,7 @@ function loginToDana_(baseUrl, user, pass, verbose) {
 
   if (pageCode === 403 || pageCode === 503) {
     throw new Error('Cloudflare blocked the request (HTTP ' + pageCode + '). ' +
-      'Use 80G Admin > Import from Uploaded XLS File.');
+      'Use 80G Admin > Import XLS from Computer.');
   }
   if (pageCode !== 200) throw new Error('Login page fetch failed: HTTP ' + pageCode);
 

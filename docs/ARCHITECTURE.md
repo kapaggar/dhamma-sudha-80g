@@ -29,7 +29,7 @@ Everything runs on **Google Apps Script** (GAS). There is no external server, no
                     │   External Services     │                      │
                     │                         ▼                      │
                     │  ┌─────────────────────────────────────────┐   │
-                    │  │  Google Drive API v2                    │   │
+                    │  │  Google Drive REST API                  │   │
                     │  │  (XLS → Google Sheet conversion)        │   │
                     │  └─────────────────────────────────────────┘   │
                     │                                                │
@@ -76,10 +76,10 @@ dana portal
     │    → XLS binary blob
     │
     ▼
-Google Drive API v2
-    │ Upload blob as GOOGLE_SHEETS mimeType → auto-conversion
+Google Drive REST API (UrlFetchApp + OAuth token)
+    │ Multipart upload as Google Sheets mimeType → auto-conversion
     │ Read sheet data
-    │ Trash temp file
+    │ Delete temp file
     ▼
 processRows_()
     │ mapColumns_() - name-based column mapping
@@ -167,11 +167,16 @@ Defined in `appsscript.json`:
 | `spreadsheets` | All sheet reads/writes |
 | `script.container.ui` | Menu creation, showModalDialog |
 | `script.send_mail` | MailApp.sendEmail |
-| `userinfo.email` | Session.getActiveUser() for admin email on failure |
-| `drive` | Drive.Files.insert (XLS conversion) |
-| `script.external_request` | UrlFetchApp.fetch (dana portal) |
+| `script.scriptapp` | Trigger install/remove (hourly write-back, reminders, Donation Day) |
+| `drive.file` | Temp XLS→Sheet conversion + deleting those temp files, via the Drive REST API (`driveCreateSheetFromBlob_`/`driveDeleteFile_`). App-created files only — the script cannot touch pre-existing Drive files, which is why the upload fallback sends file contents through the dialog instead of taking a Drive file ID |
+| `script.external_request` | UrlFetchApp.fetch, pinned by `urlFetchWhitelist` to the dana portal, 360dialog, and `www.googleapis.com` hosts |
 
-**Advanced Services:** Drive API v2 must be enabled separately in the Apps Script editor (it's declared in `appsscript.json` under `enabledAdvancedServices` but the user must also click-to-enable in the UI).
+There is deliberately no `userinfo.email` scope (failure-alert recipients come from the
+`ADMIN_EMAIL` Script Property via `getAdminEmail_` in `Utils.gs`, not `Session.getActiveUser()`),
+no Drive advanced service, and no `DriveApp` — the latter two refuse to run without the
+full `drive` scope, so Drive calls go through the REST API with `ScriptApp.getOAuthToken()`.
+
+**Advanced Services:** none. (Drive API v2 was previously required for the XLS conversion; it was replaced by direct REST calls so the manifest can stay on `drive.file`.)
 
 ## Security Model
 

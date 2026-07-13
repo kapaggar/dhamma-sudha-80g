@@ -5,6 +5,48 @@ session (human or AI) doesn't re-derive or accidentally reverse them. Newest fir
 Architecture depth lives in [`ARCHITECTURE.md`](ARCHITECTURE.md); gotchas in
 [`../CLAUDE.md`](../CLAUDE.md).
 
+## 2026-07 — Minimal OAuth scopes: `drive` → `drive.file`, `userinfo.email` dropped, fetch whitelist
+
+`appsscript.json` now requests `drive.file` instead of full `drive` and no longer
+requests `userinfo.email`. The remaining scopes map 1:1 to used services
+(spreadsheets/openById, container.ui, send_mail, scriptapp triggers,
+external_request) and cannot shrink further — `spreadsheets.currentonly` is
+impossible because the web app and the temp XLS conversions open sheets by ID.
+
+**Decisions:**
+
+- **`userinfo.email` dropped: failure alerts go to the `ADMIN_EMAIL` Script
+  Property** (`getAdminEmail_` in `Utils.gs`), not `Session.getActiveUser()`. If
+  the property is unset the alert is silently skipped (failures still land in the
+  execution log). Don't reintroduce `Session.getActiveUser()` without re-adding the
+  scope — it throws under the explicit `oauthScopes` list.
+- **`urlFetchWhitelist` pins UrlFetchApp to the dana portal, 360dialog, and
+  `www.googleapis.com` hosts.** All were already documented in-repo, so the
+  manifest leaks nothing new. If `DANA_URL`/`WA360_URL` ever point elsewhere,
+  fetches fail with "URL not permitted" until the whitelist is updated and pushed.
+- **`drive.file` only grants access to files the script itself created.** The
+  temp XLS→Sheet conversions qualify; reading an arbitrary Drive file ID does not.
+  The old fallback ("upload XLS to Drive, paste file ID") was therefore replaced
+  with `UploadDialog.html`: the admin picks the file from their computer, it's sent
+  as base64 via `google.script.run` (10 MB client-side cap), and `runUploadImport`
+  creates the conversion itself. Menu item renamed to **Import XLS from Computer**
+  (`importXlsFromComputer`). Don't "fix" a `File not found` here by restoring full
+  `drive` — the file wasn't app-created.
+- **Drive calls use the REST API, not `Drive.Files.*` or `DriveApp`.** Both the
+  Drive advanced service and `DriveApp` hard-require the full `drive` scope and
+  throw `You do not have permission to call drive.files.insert. Required
+  permissions: .../auth/drive` under `drive.file` — even though the REST endpoints
+  accept `drive.file` for app-created files. `driveCreateSheetFromBlob_` (multipart
+  upload with conversion) and `driveDeleteFile_` in `DanaImport.gs` call
+  `www.googleapis.com` directly with `ScriptApp.getOAuthToken()`. The Drive v2
+  advanced service was removed from `appsscript.json` (no editor enable step
+  anymore); temp files are now hard-deleted instead of trashed (donor data
+  shouldn't linger in the bin).
+- **Scope changes require re-authorization.** After `clasp push`, every admin must
+  re-run a menu function and accept the new (smaller) consent screen; installed
+  triggers keep running under the old grant until then. The web app deployer should
+  re-authorize and cut a new deployment version.
+
 ## 2026-07 — Donation Day mode (`DonationDay.gs`, commit 61352ca)
 
 One admin-menu toggle runs a 10-minute tick (dana import → PAN-request emails →

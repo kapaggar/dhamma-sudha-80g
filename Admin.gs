@@ -8,7 +8,7 @@ function onOpen() {
     .addSeparator()
     .addSubMenu(ui.createMenu('1. Import from Dana')
       .addItem('Auto Import (last import to today)', 'importFromDanaPortal')
-      .addItem('Import from Uploaded XLS File', 'importFromUploadedFile'))
+      .addItem('Import XLS from Computer', 'importXlsFromComputer'))
     .addSubMenu(ui.createMenu('2. Email Donors')
       .addItem('Send PAN Request Emails', 'sendPendingEmails')
       .addItem('Send Reminders (3d/7d)', 'sendReminders')

@@ -99,7 +99,7 @@ dhamma-sudha-80g/
 ├── Tests.gs           Unit tests for PAN validation, token logic (run via menu)
 ├── Form.html          Donor-facing PAN submission form (Apps Script Web App template)
 ├── ImportDialog.html  Admin modal for date-range dana import (shown via showModalDialog)
-├── appsscript.json    Project manifest: scopes, Drive API advanced service, V8 runtime
+├── appsscript.json    Project manifest: scopes, urlFetchWhitelist, V8 runtime
 ├── .graphifyignore    Files excluded from the graphify knowledge graph
 └── docs/
     ├── ARCHITECTURE.md  Full architecture reference
@@ -236,7 +236,7 @@ Admin: 80G Admin → 1. Import from Dana → Auto Import
   → POST /donation-report with date range + op=Get Report
   → Parse HTML response → build receipt_no → donation_id map
   → GET /donation-report/excel?... → XLS binary
-  → Upload XLS to Drive → convert to Google Sheet (Drive API v2)
+  → Upload XLS to Drive → convert to Google Sheet (Drive REST API, drive.file scope)
   → Read converted sheet → map columns → process rows:
       id_type=PAN → pan_status='have_pan'
       email exists in emailToPan → pan_status='have_pan' (auto-filled repeat donor)
@@ -248,7 +248,7 @@ Admin: 80G Admin → 1. Import from Dana → Auto Import
   → Append to import_log
 ```
 
-**Fallback (Cloudflare blocks):** Admin downloads XLS manually from dana portal, uploads to Google Drive, pastes file ID into `80G Admin → Import from Uploaded XLS File`. Donation_id mapping will be empty (looked up lazily during write-back).
+**Fallback (Cloudflare blocks):** Admin downloads XLS manually from dana portal, then uploads it from their computer via `80G Admin → Import XLS from Computer` (file picker dialog; max 10 MB). Donation_id mapping will be empty (looked up lazily during write-back).
 
 ### 2. Email Donors
 
@@ -372,11 +372,6 @@ clasp push
 # When asked "Manifest file has been updated. Overwrite?" → y
 ```
 
-### Enable Drive API Advanced Service
-
-In the Apps Script editor browser tab:
-- Left sidebar → **Services** (+) → **Drive API** → version **v2** → Add
-
 ### Set Script Properties
 
 Apps Script editor → ⚙ Project Settings → Script Properties:
@@ -390,6 +385,7 @@ Apps Script editor → ⚙ Project Settings → Script Properties:
 | `DANA_URL` | `https://sudha.dana.vridhamma.org` | Dana portal base URL |
 | `DANA_USER` | Dana portal username | Not email - plain username |
 | `DANA_PASS` | `echo -n 'password' \| base64` | Base64-encoded. See note below. |
+| `ADMIN_EMAIL` | Admin's email address | Recipient of trigger-failure alerts. If unset, alerts are skipped. |
 
 **`DANA_PASS` encoding:** The password is base64-encoded for screen-share hygiene (not encryption). Encode it: `echo -n 'YourPassword' | base64`. The `-n` flag is required to prevent a trailing newline from being encoded.
 
@@ -446,9 +442,10 @@ All configuration lives in Apps Script **Script Properties** (encrypted at rest 
 | `TOKEN_SECRET` | Yes | **Yes** | HMAC key for signed form links. Changing this invalidates all existing links. |
 | `CENTER_NAME` | No | No | Display name in emails and form header. Defaults to "Dhamma Sudha Vipassana Centre". |
 | `WEB_APP_URL` | Yes | No | The deployed web app URL. Set after first Deploy. |
-| `DANA_URL` | Yes | No | Dana portal base URL (`https://sudha.dana.vridhamma.org`) |
+| `DANA_URL` | Yes | No | Dana portal base URL (`https://sudha.dana.vridhamma.org`). If changed, also update `urlFetchWhitelist` in `appsscript.json`. |
 | `DANA_USER` | Yes | **Yes** | Dana portal username (not email) |
 | `DANA_PASS` | Yes | **Yes** | Dana portal password, base64-encoded |
+| `ADMIN_EMAIL` | No | No | Recipient of trigger-failure alert emails. If unset, failures are only visible in the execution log. |
 
 **What's safe to commit:** Nothing from Script Properties. The `appsscript.json` and all `.gs`/`.html` files are safe. `.clasp.json` contains only the script ID (not a secret) and is safe to commit.
 
@@ -463,7 +460,7 @@ This is a **Google Apps Script Web App**. There is no server to provision.
 | Code runtime | Google Apps Script (Google's infra) | Free |
 | Data storage | Google Sheets | Free |
 | Email sending | MailApp (Google account's quota) | Free |
-| XLS conversion | Google Drive API v2 | Free |
+| XLS conversion | Google Drive REST API | Free |
 | Web app hosting | Apps Script deployment | Free |
 
 ### Deploy a New Version
@@ -583,7 +580,7 @@ The entire system runs on Google Apps Script + Google Sheets. No servers, no hos
 
 **DANA_PASS base64-encoding:** Not cryptographic security - explicitly for screen-share hygiene during code review. `_readProp()` decodes it silently. Function is named generically to avoid broadcasting intent in a shared screen.
 
-**XLS via Drive API:** Apps Script cannot natively parse binary XLS. Uploading to Drive and converting to Google Sheets is the most reliable method. A temp file is created and immediately trashed.
+**XLS via Drive API:** Apps Script cannot natively parse binary XLS. Uploading to Drive and converting to Google Sheets is the most reliable method. A temp file is created and immediately deleted. This goes through the Drive REST API with `UrlFetchApp` (not the Drive advanced service or `DriveApp`, which both demand the full `drive` scope instead of `drive.file`).
 
 **No course codes:** The dana portal uses course type names ("10 Day Course", "Non Course"), not structured codes. The `course` field is stored as-is and not used for filtering.
 
@@ -600,7 +597,7 @@ The entire system runs on Google Apps Script + Google Sheets. No servers, no hos
 ### Unfinished TODOs
 
 - [ ] Monthly auto-import trigger must be manually installed (no code to install it via menu, unlike the hourly write-back trigger)
-- [ ] `importFromUploadedFile` does not capture `donation_id` during import (no HAR parsing in the fallback path) - needs re-fetch during write-back
+- [ ] `importXlsFromComputer` does not capture `donation_id` during import (no HAR parsing in the fallback path) - needs re-fetch during write-back
 - [ ] No deduplication logic if the same donor submits PAN twice (second submission will find 0 `need_pan` rows and return an error, which is correct but the UX could be friendlier)
 - [ ] `admin_review` sheet shows masked PAN; full PAN is only in `ready_for_80g`. If admin needs to verify a submitted PAN without exporting, there's no shortcut.
 - [ ] No test for the write-back flow end-to-end (requires live dana credentials)
@@ -638,8 +635,10 @@ The entire system runs on Google Apps Script + Google Sheets. No servers, no hos
 | `SHEET_ID script property not set` | Missing Script Property | Set `SHEET_ID` in ⚙ → Script Properties |
 | `TOKEN_SECRET script property not configured` | Missing | Set `TOKEN_SECRET` (generate with `openssl rand -hex 32`) |
 | `WEB_APP_URL script property not set` | Missing after deploy | Set `WEB_APP_URL` to the deployed web app URL |
+| No email when a trigger fails | `ADMIN_EMAIL` Script Property not set | Set `ADMIN_EMAIL`; failures are always in the execution log |
+| `The URL ... is not permitted` on fetch | Host missing from `urlFetchWhitelist` | Add the new dana/360dialog host to `urlFetchWhitelist` in `appsscript.json`, `clasp push` |
 | `Login appeared to succeed but no SESS/SSESS cookie` | Bad DANA_USER or DANA_PASS | Re-encode password: `echo -n 'pass' \| base64`. Verify username. |
-| `Cloudflare blocked the request (HTTP 403/503)` | Cloudflare challenge | Use 80G Admin → Import from Uploaded XLS File as fallback |
+| `Cloudflare blocked the request (HTTP 403/503)` | Cloudflare challenge | Use 80G Admin → Import XLS from Computer as fallback |
 | `Got HTML instead of XLS` | Session expired mid-flow or Cloudflare | Re-run import; if persists, use manual XLS upload |
 | `Could not find Receipt No column` | Dana changed export column names | Update `mapColumns_()` in `DanaImport.gs` |
 | `donors_input sheet is missing dana_donation_id / dana_updated_at columns` | Old schema | Run **80G Admin → Migrate Schema** |
@@ -647,7 +646,7 @@ The entire system runs on Google Apps Script + Google Sheets. No servers, no hos
 | `No pending PAN requests found` | Donor already submitted, or pan_status already updated | Check donors_input for email - all rows may already be `have_pan` |
 | `Edit POST HTTP 200 (expected 302)` | Dana edit form validation failed (field value error) | Check audit_log; inspect the donation_id manually in dana portal |
 | `Apps Script execution log: token mismatch expected/got lines` | See above | Both lines are logged when mismatch occurs - compare to diagnose |
-| `Drive API advanced service not enabled` | Not yet activated | Apps Script editor → Services → Drive API v2 → Add |
+| `You do not have permission to call drive.files...` | Code uses `DriveApp`/`Drive.*` advanced service, which need the full `drive` scope | Use the Drive REST helpers in `DanaImport.gs` (`driveCreateSheetFromBlob_`, `driveDeleteFile_`) instead |
 | Gmail permission error | Wrong OAuth scope | Code uses `MailApp` (script.send_mail); if you see Gmail errors, check appsscript.json scopes |
 
 ---

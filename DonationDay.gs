@@ -170,7 +170,7 @@ function donationDayTick() {
 
 function donationDayNotifyAdmin_(subject, body) {
   try {
-    const adminEmail = Session.getActiveUser().getEmail();
+    const adminEmail = getAdminEmail_();
     if (adminEmail) MailApp.sendEmail(adminEmail, subject, body);
   } catch (_) {}
 }
