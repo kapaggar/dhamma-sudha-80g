@@ -11,11 +11,15 @@ Architecture depth lives in [`ARCHITECTURE.md`](ARCHITECTURE.md); gotchas in
   `getSpreadsheet` to `generateToken_`, `readProp_`, and `getSpreadsheet_`.
   A leading underscore does not make a function private to Apps Script's browser
   bridge. Existing donor token bytes and `TOKEN_SECRET` stay unchanged.
-- **Admin actions require the bound spreadsheet context.** Every admin public
-  entry point, including existing trigger handlers and import RPCs, checks the
-  active container against `SHEET_ID` before doing work. This blocks anonymous
-  web-app RPCs without renaming installed triggers or adding OAuth scopes.
-  See Google's [bound-script contexts](https://developers.google.com/apps-script/guides/bound#special_methods)
+- **Admin actions require spreadsheet UI or a native clock event.** Live release
+  validation showed that anonymous `google.script.run` callbacks can retain the
+  active bound container; matching `SHEET_ID` alone does not authorize an admin.
+  The guard additionally requires `SpreadsheetApp.getUi()` or an installed clock
+  event whose `authMode` is the native `ScriptApp.AuthMode.FULL` object and whose
+  UID matches a project clock trigger. Never stringify or loosely compare the
+  enum: browser JSON cannot supply the native object. A per-execution flag permits
+  nested guarded calls; it is not persisted. Existing handler names and OAuth
+  scopes stay unchanged. See Google's [trigger events](https://developers.google.com/apps-script/guides/triggers/events)
   and [private-function rule](https://developers.google.com/apps-script/guides/html/communication#private_functions).
 - **Import only locks its sheet processing phase.** This supersedes the July
   lock-free import decision below: receipt deduplication alone is not atomic.

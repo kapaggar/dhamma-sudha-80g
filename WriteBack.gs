@@ -29,8 +29,8 @@ function pushPANsToDana() {
   showWriteBackResult_(result, false);
 }
 
-function autoWriteBackHourly() {
-  requireAdminContext_();
+function autoWriteBackHourly(event) {
+  requireAdminContext_(event);
   // For time-trigger - no UI alerts, just logs
   try {
     const result = writeBackPANs_(false);

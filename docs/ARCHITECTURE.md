@@ -208,12 +208,12 @@ Token = `base64url(email) + "." + hex(HMAC-SHA256(email, TOKEN_SECRET))`
 
 - Web app is `ANYONE_ANONYMOUS` (donor form must be accessible without Google login)
 - Donor reads/submissions require the HMAC token; token generation and credential reading are private helpers (trailing underscore), unreachable from `google.script.run`
-- Admin entry points check `requireAdminContext_()` before side effects. They require the active bound spreadsheet to match `SHEET_ID`. This preserves existing menu/trigger names without adding scopes; anonymous web-app calls have no bound context
+- Admin entry points check `requireAdminContext_()` before side effects. The active bound spreadsheet must match `SHEET_ID`, and the invocation must have spreadsheet UI access or a native `AuthMode.FULL` event from an installed clock trigger. Anonymous callbacks can retain the active container, so that alone is not authorization. Existing menu/trigger names and scopes are preserved.
 - This project must remain container-bound. Apps Script API executions and standalone copies cannot perform admin actions through this gate
 - No explicit rate limiting is implemented for donor form requests
 
 Google documents [private server functions](https://developers.google.com/apps-script/guides/html/communication#private_functions)
-and the [bound contexts where active-file methods work](https://developers.google.com/apps-script/guides/bound#special_methods).
+and [native trigger event objects](https://developers.google.com/apps-script/guides/triggers/events).
 
 ## Dana Portal Specifics
 

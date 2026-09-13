@@ -282,3 +282,36 @@ test('conflicting receipt mappings are omitted', () => {
     '<tr><td>ER0001</td><td><a href="/donation/edit/202">Edit</a></td></tr>');
   assert.equal(Object.keys(result).length, 0);
 });
+
+
+test('anonymous callback retains its container but cannot use spreadsheet UI', () => {
+  const h = harness({ anonymous: true });
+  assert.equal(h.context.SpreadsheetApp.getActiveSpreadsheet().getId(), 'test-sheet');
+  assert.throws(() => h.context.runImportFromDialog('invalid', 'invalid'), /bound spreadsheet/i);
+});
+
+for (const authMode of ['FULL', { name: 'FULL' }, null]) {
+  test(`serialized trigger auth mode cannot authorize a browser callback: ${JSON.stringify(authMode)}`, () => {
+    const h = harness({ anonymous: true, triggerIds: ['synthetic-trigger'] });
+    assert.throws(() => h.context.autoImportMonthly({ authMode, triggerUid: 'synthetic-trigger' }), /bound spreadsheet/i);
+    assert.equal(h.fetches.length, 0);
+    assert.ok(!h.events.includes('write'));
+  });
+}
+
+test('native clock event authorizes nested operations only for its invocation', () => {
+  const h = harness({ headless: true, triggerIds: ['synthetic-trigger'] });
+  const c = h.context;
+  c.getDefaultRange_ = () => ({ start: '2026-09-01', end: '2026-09-12' });
+  c.runDanaImport_ = () => ({ added: 1, needPan: 1 });
+  let sent = false;
+  c.sendPendingEmails = () => { c.requireAdminContext_(); sent = true; };
+  c.autoImportMonthly({ authMode: c.ScriptApp.AuthMode.FULL, triggerUid: 'synthetic-trigger' });
+  assert.equal(sent, true);
+  assert.throws(() => harness({ anonymous: true }).context.requireAdminContext_(), /bound spreadsheet/i);
+});
+
+test('native event with an unknown trigger ID is rejected', () => {
+  const h = harness({ headless: true });
+  assert.throws(() => h.context.autoImportMonthly({ authMode: h.context.ScriptApp.AuthMode.FULL, triggerUid: 'unknown' }), /bound spreadsheet/i);
+});

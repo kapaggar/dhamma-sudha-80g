@@ -1,14 +1,36 @@
 // Utils.gs
 
-// Bound editor/menu/dialog/trigger context is unavailable in a web-app RPC.
-// Keep this check before any admin side effect, including in trigger wrappers.
-// https://developers.google.com/apps-script/guides/bound#special_methods
-function requireAdminContext_() {
+// Verify spreadsheet UI or a native installed clock event before admin effects.
+// Active-container lookup alone also succeeds in anonymous browser callbacks.
+// https://developers.google.com/apps-script/guides/triggers/events
+// This flag is local to one Apps Script execution, never stored between requests.
+let adminContextVerified_ = false;
+
+function requireAdminContext_(event) {
+  if (adminContextVerified_) return;
   let active = null;
   try { active = SpreadsheetApp.getActiveSpreadsheet(); } catch (_) {}
+  const message = 'This action is available only from the bound spreadsheet. Open the 80G Admin menu.';
   if (!active || active.getId() !== PropertiesService.getScriptProperties().getProperty('SHEET_ID')) {
-    throw new Error('This action is available only from the bound spreadsheet. Open the 80G Admin menu.');
+    throw new Error(message);
   }
+
+  // google.script.run can retain the bound container, but cannot obtain its UI
+  // from the public web app. Menus, editor runs and sheet dialogs have the UI.
+  let hasUi = false;
+  try { hasUi = !!SpreadsheetApp.getUi(); } catch (_) {}
+  if (!hasUi) {
+    // Clock events carry a native Enum object. A browser-supplied string or JSON
+    // object cannot equal this value. Never coerce authMode to a string here.
+    const nativeClockEvent = event && typeof event.authMode === 'object' &&
+      event.authMode === ScriptApp.AuthMode.FULL && event.triggerUid &&
+      ScriptApp.getProjectTriggers().some(trigger =>
+        trigger.getUniqueId() === String(event.triggerUid) &&
+        trigger.getTriggerSource() === ScriptApp.TriggerSource.CLOCK);
+    if (!nativeClockEvent) throw new Error(message);
+  }
+  // Scheduled handlers call other guarded operations within the same invocation.
+  adminContextVerified_ = true;
 }
 
 /**

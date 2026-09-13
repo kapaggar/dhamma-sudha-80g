@@ -111,8 +111,8 @@ function donationDayStatus() {
 // sends run under tryLock(0) so a tick never queues behind write-back and never
 // starves submitForm's 20s waitLock - donor form submissions are the peak path
 // on donation day.
-function donationDayTick() {
-  requireAdminContext_();
+function donationDayTick(event) {
+  requireAdminContext_(event);
   const props = PropertiesService.getScriptProperties();
   const untilIso = props.getProperty(DONATION_DAY_UNTIL_PROP);
 

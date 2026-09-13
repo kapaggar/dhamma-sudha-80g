@@ -71,9 +71,9 @@ function harness(options = {}) {
     }) },
     SpreadsheetApp: {
       openById: () => spreadsheet,
-      getActiveSpreadsheet: () => options.anonymous ? null : spreadsheet,
+      getActiveSpreadsheet: () => options.noContainer ? null : spreadsheet,
       flush: () => events.push('flush'),
-      getUi: () => ({ alert() {} })
+      getUi: () => { if (options.anonymous || options.headless) throw Error('Cannot call getUi from this context'); return { alert() {} }; }
     },
     LockService: { getScriptLock: () => ({
       waitLock() { if (options.busy) throw Error('busy'); locked = true; events.push('lock'); },
@@ -91,7 +91,12 @@ function harness(options = {}) {
       formatDate: d => d.toISOString().slice(0, 10)
     },
     UrlFetchApp: { fetch(url, opts) { fetches.push({ url, opts }); throw Error('Network disabled in tests'); } },
-    ScriptApp: { getOAuthToken: () => 'synthetic-oauth' }
+    ScriptApp: {
+      getOAuthToken: () => 'synthetic-oauth',
+      AuthMode: { FULL: Object.freeze({ name: 'FULL' }) },
+      TriggerSource: { CLOCK: 'CLOCK' },
+      getProjectTriggers: () => (options.triggerIds || []).map(id => ({ getUniqueId: () => id, getTriggerSource: () => 'CLOCK' }))
+    }
   });
   for (const file of sources) vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
   return { context, logs, events, sheets, props, fetches };

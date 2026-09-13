@@ -7,7 +7,7 @@ data model and deployment constraints. All test records and preview data are syn
 
 | Area | Failure before | Result now |
 |---|---|---|
-| Browser access | Public token generator and leading-underscore credential reader were browser-callable; admin actions had no context gate | Sensitive helpers are private; admin entry points reject calls outside the configured bound spreadsheet before side effects |
+| Browser access | Public token generator and leading-underscore credential reader were browser-callable; admin actions had no context gate | Sensitive helpers are private; admin entry points require the configured spreadsheet plus UI access or a native installed clock event before side effects |
 | Token diagnostics | Invalid submissions logged donor identity, supplied tokens, and valid expected tokens | Validation never logs token values or donor identity |
 | Form submission | Malformed payloads threw; truthy nonboolean consent was accepted; a missing submissions sheet could leave partial donor updates | Defensive payload checks, explicit boolean consent, and storage preflight before writes |
 | Import dates/files | Impossible or reversed dates passed server checks; upload size/type limits were client-only; XLSX used XLS MIME type | Server validates dates and upload limits; XLSX MIME type is preserved; temporary filenames are generated |
@@ -22,9 +22,15 @@ data model and deployment constraints. All test records and preview data are syn
 
 The access changes follow Google's documented
 [private-function convention](https://developers.google.com/apps-script/guides/html/communication#private_functions)
-and [bound-script context restrictions](https://developers.google.com/apps-script/guides/bound#special_methods).
-The active-container gate deliberately requires this project to remain bound to its
+and [native trigger events](https://developers.google.com/apps-script/guides/triggers/events).
+Live validation caught an incorrect initial assumption: anonymous callbacks retain
+the active container, but cannot access the spreadsheet UI. The corrected gate
+requires UI access or a native installed clock event in addition to matching the
 configured Sheet. It adds no OAuth scopes and preserves installed handler names.
+Regression mocks now reproduce the observed browser context and reject serialized
+trigger-event lookalikes. A live invalid-date RPC was rejected before import, and a
+temporary clock probe verified the native event passes the gate. The probe logged
+its result and removed its trigger; it did not process donors or send messages.
 
 ## UI changes
 

@@ -62,8 +62,8 @@ function isImportDate_(value) {
 /**
  * Time-triggered monthly auto-import.
  */
-function autoImportMonthly() {
-  requireAdminContext_();
+function autoImportMonthly(event) {
+  requireAdminContext_(event);
   const range = getDefaultRange_();
   try {
     const result = runDanaImport_(range.start, range.end);

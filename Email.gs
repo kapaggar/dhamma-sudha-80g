@@ -18,7 +18,7 @@ function getEmailMaxPerRun_() {
 }
 
 function sendPendingEmails(silent) {
-  requireAdminContext_();
+  requireAdminContext_(silent);
   const ss = getSpreadsheet_();
   const donorsSheet = ss.getSheetByName('donors_input');
   if (!donorsSheet || donorsSheet.getLastRow() < 2) {
@@ -158,8 +158,8 @@ function writeEmailLogRow_(logSheet, logRowByEmail, email, receiptList, nowIso, 
   }
 }
 
-function sendReminders() {
-  requireAdminContext_();
+function sendReminders(event) {
+  requireAdminContext_(event);
   const ss = getSpreadsheet_();
   const logSheet = ss.getSheetByName('email_log');
   if (!logSheet || logSheet.getLastRow() < 2) return;
@@ -358,8 +358,8 @@ function escapeHtml_(s) {
 // Hourly email-sending trigger (drains a large backlog within the daily quota)
 // ---------------------------------------------------------------------------
 
-function autoSendEmailsHourly() {
-  requireAdminContext_();
+function autoSendEmailsHourly(event) {
+  requireAdminContext_(event);
   try {
     const r = sendPendingEmails(true);
     Logger.log('autoSendEmailsHourly: ' + JSON.stringify(r));
