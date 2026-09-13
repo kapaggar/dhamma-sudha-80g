@@ -8,25 +8,36 @@ contains dated snapshots, a token-cost log, and an incremental cache).
 ## Why (token economics)
 
 - First full build of this repo cost **~78k input tokens** (see `graphify-out/cost.json`).
-- Re-runs cost **0 tokens**: `graphify-out/manifest.json` stores per-file AST/semantic
-  hashes, so `graphify update .` only re-analyzes files that actually changed.
+- Incremental runs use per-file hashes in `graphify-out/manifest.json` and the
+  semantic cache. AST extraction costs no LLM tokens; changed documents and HTML
+  need a semantic pass. Unchanged cached content does not need re-extraction.
 - `graphify-out/GRAPH_REPORT.md` is a ~6 KB summary of the whole codebase — pointing an
   AI session at it is far cheaper than having it read `WriteBack.gs` + `DanaImport.gs`
   (~60 KB) to orient itself.
 
-**Never delete `graphify-out/cache/`** — that is what makes updates free.
+**Never delete `graphify-out/cache/`** - it avoids repeating semantic extraction.
 
 ## Daily usage
 
 ```bash
-graphify update .        # after code changes; incremental, no API cost (no LLM)
 graphify query <topic>   # explore the graph interactively
 open graphify-out/graph.html   # visual graph
 ```
 
-For **doc/markdown/image changes**, `graphify update .` only re-extracts code — run
-`/graphify --update` inside an AI assistant session to refresh the semantic layer
-(this one does use LLM tokens, still incremental via the cache).
+After changes, use `/graphify --update` inside an AI assistant session with the
+`.gs` runtime patch applied before detection and extraction:
+
+```python
+import graphify.detect as detect
+import graphify.extract as extract
+detect.CODE_EXTENSIONS.add(".gs")
+extract._DISPATCH[".gs"] = extract._DISPATCH[".js"]
+```
+
+**Do not run bare `graphify update .` in this repository.** Stock detection ignores
+Apps Script files and can silently drop them from the graph. See the graphify
+entry in [DECISIONS.md](DECISIONS.md). Changed documents and HTML also require the
+skill's semantic pass; a code-only CLI update cannot refresh those relationships.
 
 Check freshness: `GRAPH_REPORT.md` records the commit it was built from — compare with
 `git rev-parse HEAD`.
@@ -65,7 +76,7 @@ Do the following in order. Report what you find at each step before moving on.
   and `graphify-out/GRAPH_REPORT.md` (the built-from commit hash).
 - Compare the report's commit hash with `git rev-parse HEAD` and tell me if
   the graph is stale.
-- NEVER delete `graphify-out/cache/` — it's what makes re-runs cost 0 tokens.
+- NEVER delete `graphify-out/cache/` - preserve cached semantic extraction.
 
 ## 3. Post-install repo hygiene
 - Create a `.graphifyignore` in the repo root (gitignore syntax) excluding:
@@ -81,10 +92,11 @@ Do the following in order. Report what you find at each step before moving on.
   concepts, not real data values; flag anything sensitive before committing.
 
 ## 4. Build or refresh the graph
-- If no graph exists yet: run `graphify .` (full build — costs tokens; tell
-  me the expected scope first: number of files after ignores).
-- If a graph exists and is stale: run `graphify update .` (incremental,
-  no API cost — only re-analyzes files whose hashes changed).
+- Use the graphify skill pipeline with the `.gs` runtime patch from the daily
+  usage section applied before detection/extraction. Never run the bare update CLI.
+- If no graph exists, perform a full build; report the expected file scope first.
+- If a graph exists and is stale, perform an incremental skill update, preserving
+  cached semantic results. Include changed documents and HTML in the semantic pass.
 - Afterwards, report the token cost from `cost.json` and the node/edge/
   community summary from `GRAPH_REPORT.md`.
 
@@ -96,7 +108,7 @@ Do the following in order. Report what you find at each step before moving on.
 
 ## 6. Tell me how to use it to save tokens
 Finish with a short recap:
-- `graphify update .` after code changes (incremental, free) vs full re-runs
+- incremental skill updates with the `.gs` patch after changes vs full re-runs
 - keep `graphify-out/cache/` intact
 - point AI sessions at `GRAPH_REPORT.md` or `graphify query <topic>` for
   cheap codebase orientation instead of reading raw source files

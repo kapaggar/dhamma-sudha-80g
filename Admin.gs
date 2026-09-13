@@ -1,6 +1,7 @@
 // Admin.gs
 
 function onOpen() {
+  requireAdminContext_();
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('80G Admin')
     .addItem('Initialize All Sheets', 'initSheets')
@@ -52,7 +53,8 @@ function onOpen() {
  * Admin review: categorize all donors_input rows.
  */
 function refreshAdminReview() {
-  const ss = getSpreadsheet();
+  requireAdminContext_();
+  const ss = getSpreadsheet_();
   const donorsSheet = ss.getSheetByName('donors_input');
   if (!donorsSheet || donorsSheet.getLastRow() < 2) {
     SpreadsheetApp.getUi().alert('No donor records.'); return;
@@ -142,7 +144,8 @@ function refreshAdminReview() {
  * Full PAN shown (this is the merge/export step).
  */
 function exportReadyFor80G() {
-  const ss = getSpreadsheet();
+  requireAdminContext_();
+  const ss = getSpreadsheet_();
   const donorsSheet = ss.getSheetByName('donors_input');
   if (!donorsSheet || donorsSheet.getLastRow() < 2) {
     SpreadsheetApp.getUi().alert('No records.'); return;
@@ -184,17 +187,22 @@ function exportReadyFor80G() {
       continue; // shouldn't happen but skip
     }
 
+    const validatedPan = validateAndNormalizePAN(pan);
+    if (!validatedPan.valid) continue;
+
     rows.push([
       row[0], row[1], row[3], row[4], row[5],
       row[6], row[7], row[8],
       row[10], row[11], row[13], row[14], row[15],
-      pan, panName, panSource, now
+      validatedPan.pan, panName, panSource, now
     ]);
   }
 
   if (rows.length > 0) {
     expSheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
   }
+
+  auditLog(ss, 'admin', 'export_ready_for_80g', 'rows=' + rows.length, 'ready_for_80g', '', rows.length, '');
 
   SpreadsheetApp.getUi().alert('Exported ' + rows.length + ' rows ready for 80G to "ready_for_80g" sheet.');
 }

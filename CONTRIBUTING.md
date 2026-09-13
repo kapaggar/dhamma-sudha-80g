@@ -39,7 +39,8 @@ There is no local runtime — code executes only in Google Apps Script.
 3. `clasp push` to deploy code. Web-app changes (`Code.gs` doGet/submitForm,
    `Form.html`) additionally need: Apps Script editor → Deploy → Manage
    deployments → New version.
-4. Enable the Drive API v2 advanced service in the editor (Services → Drive API v2).
+4. Keep the manifest scopes unchanged. XLS conversion uses the Drive REST API
+   with `drive.file`; do not enable the Drive advanced service or use `DriveApp`.
 5. `.claspignore` allowlists root `*.gs`, `*.html`, `appsscript.json` only. If
    you add a new source file type, extend the allowlist or it silently won't push.
 

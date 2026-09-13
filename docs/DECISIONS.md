@@ -5,6 +5,34 @@ session (human or AI) doesn't re-derive or accidentally reverse them. Newest fir
 Architecture depth lives in [`ARCHITECTURE.md`](ARCHITECTURE.md); gotchas in
 [`../CLAUDE.md`](../CLAUDE.md).
 
+## 2026-09 - Browser access, import correctness, and UI review
+
+- **Private helpers end with `_`.** Renamed `generateToken`, `_readProp`, and
+  `getSpreadsheet` to `generateToken_`, `readProp_`, and `getSpreadsheet_`.
+  A leading underscore does not make a function private to Apps Script's browser
+  bridge. Existing donor token bytes and `TOKEN_SECRET` stay unchanged.
+- **Admin actions require the bound spreadsheet context.** Every admin public
+  entry point, including existing trigger handlers and import RPCs, checks the
+  active container against `SHEET_ID` before doing work. This blocks anonymous
+  web-app RPCs without renaming installed triggers or adding OAuth scopes.
+  See Google's [bound-script contexts](https://developers.google.com/apps-script/guides/bound#special_methods)
+  and [private-function rule](https://developers.google.com/apps-script/guides/html/communication#private_functions).
+- **Import only locks its sheet processing phase.** This supersedes the July
+  lock-free import decision below: receipt deduplication alone is not atomic.
+  Portal fetch and Drive conversion remain outside the script lock. The receipt
+  read, PAN lookup, and append are locked together and flushed before release.
+- **PAN status follows validated PAN availability, then contactability.** Valid
+  PAN with no email is still ready; invalid source PAN cannot be auto-filled or
+  exported. New imports mask column R's PAN. A later donor submission can repair
+  an invalid PAN even when dana's original `id_type` was already PAN.
+- **Receipt mapping stays inside a table row.** Ambiguous/conflicting mappings
+  are omitted, preventing a nearby receipt from targeting another donation.
+- **Shared UI styles stay local.** `UiStyles.html` serves the donor form, import
+  dialogs, and message screen. No external fonts, scripts, trackers, or new hosts.
+  The web-app viewport is also set through `HtmlOutput.addMetaTag`.
+
+Validation and release checks: [`REVIEW.md`](REVIEW.md).
+
 ## 2026-07 — Minimal OAuth scopes: `drive` → `drive.file`, `userinfo.email` dropped, fetch whitelist
 
 `appsscript.json` now requests `drive.file` instead of full `drive` and no longer

@@ -163,7 +163,7 @@ function sendWhatsApp360_(opts) {
 // }
 // silent=true suppresses UI alerts (for triggers). Returns a stats object.
 function runWaSend_(cfg) {
-  const ss = getSpreadsheet();
+  const ss = getSpreadsheet_();
   const donors = ss.getSheetByName('donors_input');
   if (!donors || donors.getLastRow() < 2) {
     if (!cfg.silent) { try { SpreadsheetApp.getUi().alert('No donor records.'); } catch (_) {} }
@@ -303,6 +303,7 @@ function runWaSend_(cfg) {
 // Campaign 1 - DIRECT LINK: needs a NEW approved template carrying the signed PAN link.
 // silent=true suppresses UI alerts (for triggers). Returns a stats object.
 function sendPendingWhatsApp(silent) {
+  requireAdminContext_();
   const props = PropertiesService.getScriptProperties();
   const webAppUrl = props.getProperty('WEB_APP_URL');
   if (!webAppUrl) throw new Error('WEB_APP_URL script property not set.');
@@ -322,7 +323,7 @@ function sendPendingWhatsApp(silent) {
     tipLabel: 'Enable Hourly Link Sending',
     silent: silent,
     buildParams: function (email, info) {
-      const token = generateToken(email);
+      const token = generateToken_(email);
       const link = webAppUrl + '?email=' + encodeURIComponent(email) + '&token=' + encodeURIComponent(token);
       return [ (info.name || 'Meditator'), centerName, link ];
     }
@@ -334,6 +335,7 @@ function sendPendingWhatsApp(silent) {
 // 10000). Shares wa_log with the general link campaign, so dedup is shared: a donor messaged
 // by either run is not messaged again by the other.
 function sendHighValuePendingWhatsApp(silent) {
+  requireAdminContext_();
   const props = PropertiesService.getScriptProperties();
   const webAppUrl = props.getProperty('WEB_APP_URL');
   if (!webAppUrl) throw new Error('WEB_APP_URL script property not set.');
@@ -353,7 +355,7 @@ function sendHighValuePendingWhatsApp(silent) {
     tipLabel: '',
     silent: silent,
     buildParams: function (email, info) {
-      const token = generateToken(email);
+      const token = generateToken_(email);
       const link = webAppUrl + '?email=' + encodeURIComponent(email) + '&token=' + encodeURIComponent(token);
       return [ (info.name || 'Meditator'), centerName, link ];
     }
@@ -367,6 +369,7 @@ function sendHighValuePendingWhatsApp(silent) {
 // wa_log and suppress the real direct-link send once that template is approved.
 // status_update_2 body: "Dear {{1}},\nThe status of your application for \n{{2}}\nis *{{3}}*.\nCheck email for details"
 function sendPendingWhatsAppNudge(silent) {
+  requireAdminContext_();
   const props = PropertiesService.getScriptProperties();
   const subject = props.getProperty('WA_NUDGE_SUBJECT') || 'your 80G donation tax-exemption certificate';
   const status = props.getProperty('WA_NUDGE_STATUS') || 'PAN pending';
@@ -411,6 +414,7 @@ function writeWaLogRow_(waLog, waRowByEmail, phone, email, receiptList, nowIso, 
 // Use this to verify creds + template approval + delivery before a real run.
 // ---------------------------------------------------------------------------
 function promptTestWhatsApp() {
+  requireAdminContext_();
   const ui = SpreadsheetApp.getUi();
   const props = PropertiesService.getScriptProperties();
   if (!props.getProperty('WA_TEMPLATE_NAME')) {
@@ -441,6 +445,7 @@ function promptTestWhatsApp() {
 // Hourly WhatsApp-sending trigger (drains a large list within the 24h limit)
 // ---------------------------------------------------------------------------
 function autoSendWhatsAppHourly() {
+  requireAdminContext_();
   try {
     const r = sendPendingWhatsApp(true);
     Logger.log('autoSendWhatsAppHourly: ' + JSON.stringify(r));
@@ -458,6 +463,7 @@ function autoSendWhatsAppHourly() {
 }
 
 function installHourlyWhatsAppTrigger() {
+  requireAdminContext_();
   const triggers = ScriptApp.getProjectTriggers();
   let removed = 0;
   triggers.forEach(t => {
@@ -472,6 +478,7 @@ function installHourlyWhatsAppTrigger() {
 }
 
 function disableHourlyWhatsAppTrigger() {
+  requireAdminContext_();
   const triggers = ScriptApp.getProjectTriggers();
   let removed = 0;
   triggers.forEach(t => {
@@ -485,6 +492,7 @@ function disableHourlyWhatsAppTrigger() {
 // Send this to your own phone first, before any real nudge run.
 // ---------------------------------------------------------------------------
 function promptTestWhatsAppNudge() {
+  requireAdminContext_();
   const ui = SpreadsheetApp.getUi();
   const props = PropertiesService.getScriptProperties();
   if (!props.getProperty('WA360_URL') || !props.getProperty('WA360_API_KEY')) {
@@ -517,6 +525,7 @@ function promptTestWhatsAppNudge() {
 // Hourly EMAIL-NUDGE trigger (drains a large list within the 24h limit)
 // ---------------------------------------------------------------------------
 function autoSendWhatsAppNudgeHourly() {
+  requireAdminContext_();
   try {
     const r = sendPendingWhatsAppNudge(true);
     Logger.log('autoSendWhatsAppNudgeHourly: ' + JSON.stringify(r));
@@ -534,6 +543,7 @@ function autoSendWhatsAppNudgeHourly() {
 }
 
 function installHourlyWhatsAppNudgeTrigger() {
+  requireAdminContext_();
   const triggers = ScriptApp.getProjectTriggers();
   let removed = 0;
   triggers.forEach(t => {
@@ -548,6 +558,7 @@ function installHourlyWhatsAppNudgeTrigger() {
 }
 
 function disableHourlyWhatsAppNudgeTrigger() {
+  requireAdminContext_();
   const triggers = ScriptApp.getProjectTriggers();
   let removed = 0;
   triggers.forEach(t => {

@@ -23,7 +23,7 @@ function donationDayExpired_(untilIso, nowMs) {
   if (!untilIso) return true;
   const t = Date.parse(untilIso);
   if (isNaN(t)) return true;
-  return nowMs > t;
+  return nowMs >= t;
 }
 
 // Delete every trigger whose handler is `name`; returns removed count.
@@ -38,6 +38,7 @@ function deleteTriggersByHandler_(name) {
 }
 
 function enableDonationDayMode() {
+  requireAdminContext_();
   const ui = SpreadsheetApp.getUi();
   const resp = ui.alert('Enable Donation Day mode?',
     'For the next ' + DONATION_DAY_HOURS + ' hours, every ' + DONATION_DAY_TICK_MINUTES +
@@ -61,7 +62,7 @@ function enableDonationDayMode() {
   const removedEmail = deleteTriggersByHandler_('autoSendEmailsHourly');
   const removedNudge = deleteTriggersByHandler_('autoSendWhatsAppNudgeHourly');
 
-  auditLog(getSpreadsheet(), 'admin', 'donation_day_enabled', '', 'expires_at', '', untilIso, '');
+  auditLog(getSpreadsheet_(), 'admin', 'donation_day_enabled', '', 'expires_at', '', untilIso, '');
 
   ui.alert('Donation Day mode enabled.\n\n' +
     'Runs every ' + DONATION_DAY_TICK_MINUTES + ' minutes until ' +
@@ -71,13 +72,14 @@ function enableDonationDayMode() {
 }
 
 function disableDonationDayMode() {
+  requireAdminContext_();
   const removed = deleteTriggersByHandler_('donationDayTick');
   const props = PropertiesService.getScriptProperties();
   const untilIso = props.getProperty(DONATION_DAY_UNTIL_PROP) || '';
   props.deleteProperty(DONATION_DAY_UNTIL_PROP);
   props.deleteProperty(DONATION_DAY_ERRMAIL_PROP);
 
-  auditLog(getSpreadsheet(), 'admin', 'donation_day_disabled', '', 'expires_at', untilIso, '', '');
+  auditLog(getSpreadsheet_(), 'admin', 'donation_day_disabled', '', 'expires_at', untilIso, '', '');
 
   SpreadsheetApp.getUi().alert('Donation Day mode disabled.\n\n' +
     'Removed ' + removed + ' trigger(s).\n\n' +
@@ -86,6 +88,7 @@ function disableDonationDayMode() {
 }
 
 function donationDayStatus() {
+  requireAdminContext_();
   const untilIso = PropertiesService.getScriptProperties().getProperty(DONATION_DAY_UNTIL_PROP);
   const triggers = ScriptApp.getProjectTriggers()
     .filter(t => t.getHandlerFunction() === 'donationDayTick').length;
@@ -104,11 +107,12 @@ function donationDayStatus() {
   SpreadsheetApp.getUi().alert('Donation Day mode: ' + msg);
 }
 
-// Trigger handler. Import runs lock-free (idempotent via receipt_no dedup);
+// Trigger handler. Import network calls run lock-free; sheet append takes a short lock;
 // sends run under tryLock(0) so a tick never queues behind write-back and never
 // starves submitForm's 20s waitLock - donor form submissions are the peak path
 // on donation day.
 function donationDayTick() {
+  requireAdminContext_();
   const props = PropertiesService.getScriptProperties();
   const untilIso = props.getProperty(DONATION_DAY_UNTIL_PROP);
 
@@ -117,7 +121,7 @@ function donationDayTick() {
     props.deleteProperty(DONATION_DAY_UNTIL_PROP);
     props.deleteProperty(DONATION_DAY_ERRMAIL_PROP);
     try {
-      auditLog(getSpreadsheet(), 'system', 'donation_day_auto_off', '', 'expired_at', untilIso || '', '', '');
+      auditLog(getSpreadsheet_(), 'system', 'donation_day_auto_off', '', 'expired_at', untilIso || '', '', '');
     } catch (e) { Logger.log('donationDayTick auto-off audit failed: ' + e.message); }
     donationDayNotifyAdmin_('[80G System] Donation Day mode ended',
       'Donation Day mode expired and its trigger was removed.\n\n' +

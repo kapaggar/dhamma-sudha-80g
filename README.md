@@ -30,7 +30,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the detailed architecture
 
 - Core flows (import, email, form submission) are working.
 - Write-back to dana portal (`WriteBack.gs`) is implemented but should be dry-run tested on real data before enabling the hourly trigger.
-- No automated tests for the dana integration (login, import, write-back) - these require live credentials.
+- Offline regression tests cover import processing, write-back preflight, access boundaries, and UI behavior. Live Google/Drupal integration still requires deployment validation.
 - The dana portal runs behind Cloudflare, which may block Apps Script requests intermittently. A manual XLS upload fallback exists.
 - 80G certificate generation is out of scope - the dana portal handles that.
 
@@ -156,7 +156,7 @@ One row per dana transaction. Primary key: `receipt_no`.
 | O | amount | Sum of all payment columns |
 | P | merchant_ref | UPI/Razorpay transaction reference |
 | Q | id_type | As-is from dana: "PAN", "Aadhaar", "Passport", "" |
-| R | id_value | The ID value from dana (Aadhaar no, PAN, etc) |
+| R | id_value | The ID value from dana; PAN is masked on new imports |
 | S | pan_collected | Normalized PAN (from form submission or copied from id_value if id_type=PAN) |
 | T | pan_name | Donor name as used on PAN (from existing full_name; donors no longer re-enter) |
 | U | pan_status | `need_pan` / `have_pan` / `no_email` |
@@ -209,7 +209,7 @@ Append-only log of every action. Never deleted. Actor values: `form_submit`, `da
 | action | `pan_collected`, `email_sent`, `bulk_insert`, `dana_updated`, etc |
 | record_key | receipt_no or email |
 | field_changed | |
-| old_value | PAN masked in display contexts but full value here |
+| old_value | PAN masked; prior identity values redacted during write-back |
 | new_value | |
 | source_id | submission_id, donation_id, etc |
 
@@ -409,7 +409,23 @@ Copy the Web app URL and set it as the `WEB_APP_URL` Script Property.
 
 In Apps Script editor: function dropdown → `runAllTests` → Run → View → Execution log
 
-Tests cover PAN validation (valid, lowercase, spaces, too short, wrong format, null) and token generation/validation (match, tamper, wrong email, case-insensitive).
+The editor suite covers PAN, token, expiry, and HTML decoding helpers. For the offline
+regression suite (Node.js 18+; no dependencies or live services):
+
+```bash
+node --test tests/*.test.cjs
+```
+
+Preview the donor form and admin dialogs with synthetic data:
+
+```bash
+node tests/preview.cjs
+```
+
+Open `http://127.0.0.1:8787`, `/import`, `/upload`, or `/invalid`. The preview simulates
+saving; it does not access Google or send messages. `?state=received`, `?state=empty`,
+`?outcome=failure`, and `?outcome=empty` exercise other donor states.
+See [docs/REVIEW.md](docs/REVIEW.md) for the fixes and deployment validation.
 
 ### Test Dana Login
 
@@ -420,11 +436,10 @@ Expected output: `=== LOGIN OK === Cookie length: NNN Cookie names: SSESS620a...
 ### Refresh the Code Knowledge Graph (graphify)
 
 A semantic knowledge graph of this repo lives in `graphify-out/` (gitignored, rebuildable).
-After code or doc changes, refresh it — incremental and free (no API tokens):
-
-```bash
-graphify update .
-```
+After code or doc changes, refresh it through the graphify skill pipeline with
+the `.gs` runtime patch in [docs/DECISIONS.md](docs/DECISIONS.md). Do not run the
+bare `graphify update .` command: it drops Apps Script files. AST extraction is
+free; changed documents and HTML use semantic extraction with cached results.
 
 See [docs/GRAPHIFY.md](docs/GRAPHIFY.md) for setup, token economics, and the
 fresh-machine setup prompt. Never delete `graphify-out/cache/` — it's what makes
@@ -506,7 +521,7 @@ token = base64url(email) + "." + hex(HMAC-SHA256(email, TOKEN_SECRET))
 
 Format: `[A-Z]{5}[0-9]{4}[A-Z]` - exactly 10 characters.
 
-Normalization pipeline: `trim → uppercase → remove internal spaces`. Applied client-side (live feedback, `OK`/`X` badge) and server-side (in `submitForm` before any write).
+Normalization pipeline: `trim → uppercase → remove internal spaces`. Applied client-side (accessible inline feedback) and server-side before submission, import classification, export, and write-back.
 
 PAN is stored full in `pan_collected` and `submissions.pan`. It is **masked** (`ABCDE****F`) in `admin_review` and in log messages. Full PAN is only shown in `ready_for_80g` export.
 
@@ -527,13 +542,13 @@ The dana portal is a Drupal 7 site behind Cloudflare. Three-step login:
 
 The exact query string for step 3 was determined by HAR analysis. It differs from the simpler `?start&end&category&txn_type=all` seen in URLs elsewhere - notably `id_type=all` (not `txn_type=all`), and several valueless params (`txn_type`, `don_tags`, `synced`, etc).
 
-**XLS parsing:** `UrlFetchApp` returns a blob. The blob is uploaded to Google Drive with `mimeType: GOOGLE_SHEETS` which triggers automatic conversion. The resulting Google Sheet is read via `SpreadsheetApp.openById()`, then the temp file is trashed.
+**XLS parsing:** `UrlFetchApp` returns a blob. The blob is uploaded to Google Drive with `mimeType: GOOGLE_SHEETS` which triggers automatic conversion. The resulting Google Sheet is read via `SpreadsheetApp.openById()`, then the temp file is permanently deleted.
 
 ### Receipt → Donation ID Mapping
 
 The dana XLS export does not include the donation_id (the internal numeric ID used in `/donation/edit/{id}`). The mapping is extracted from the HTML of the `/donation-report` POST response by:
-1. Finding all `/donation/edit/(\d+)` patterns
-2. For each, looking back up to 3000 chars in the HTML for the nearest `ER\d+` receipt number
+1. Finding table rows containing one distinct `/donation/edit/(\d+)` ID and one distinct `ER-?\d+` receipt
+2. Mapping within that row only, regardless of link order; omitting ambiguous or conflicting mappings
 
 This is stored in `donors_input.dana_donation_id` (column Y). For rows imported before this column was added, `WriteBack.gs` re-fetches the report HTML during write-back.
 
@@ -547,7 +562,7 @@ All other form fields (donor name, address, course, amount, payment mode, etc.) 
 
 ### Repeat Donor Auto-Fill
 
-During import, if a donor's email already has a `pan_collected` value in an existing row, new donations from the same email are automatically marked `have_pan` with the same PAN. This means the donor does not need to re-submit PAN for each course.
+During import, if a donor's email already has a `pan_collected` value in an existing row, new donations from the same email are automatically marked `have_pan` with the same validated PAN. Valid PANs elsewhere in the same import are also considered, regardless of row order. This means the donor does not need to re-submit PAN for each course.
 
 ### Multi-Receipt Single Email
 
@@ -578,7 +593,7 @@ The entire system runs on Google Apps Script + Google Sheets. No servers, no hos
 
 **MailApp not GmailApp:** `GmailApp` requires a broader OAuth scope (`mail.google.com`) which caused permission errors in Apps Script context. `MailApp` (scope: `script.send_mail`) is sufficient for send-only use and was used instead.
 
-**DANA_PASS base64-encoding:** Not cryptographic security - explicitly for screen-share hygiene during code review. `_readProp()` decodes it silently. Function is named generically to avoid broadcasting intent in a shared screen.
+**DANA_PASS base64-encoding:** Not cryptographic security - explicitly for screen-share hygiene during code review. `readProp_()` decodes it silently. Function is named generically to avoid broadcasting intent in a shared screen.
 
 **XLS via Drive API:** Apps Script cannot natively parse binary XLS. Uploading to Drive and converting to Google Sheets is the most reliable method. A temp file is created and immediately deleted. This goes through the Drive REST API with `UrlFetchApp` (not the Drive advanced service or `DriveApp`, which both demand the full `drive` scope instead of `drive.file`).
 
@@ -604,7 +619,7 @@ The entire system runs on Google Apps Script + Google Sheets. No servers, no hos
 
 ### Known Bugs / Fragile Areas
 
-- **Receipt-to-donation_id parsing** (`parseReceiptToDonationIdMap_`) uses a heuristic: look back 3000 chars in HTML for the nearest `ER\d+` before each `/donation/edit/\d+` link. This breaks if the dana HTML structure changes significantly, or if a receipt number appears multiple times in the same region.
+- **Receipt-to-donation_id parsing** (`parseReceiptToDonationIdMap_`) requires an unambiguous receipt and edit ID within the same HTML table row. Changed portal markup can leave mappings missing; such records are skipped for write-back rather than guessing across rows.
 - **Cloudflare** can block the dana login at any time. There is no automated retry or fallback; the admin must use the manual XLS upload if this happens.
 - **Apps Script 6-minute execution limit:** Large imports (hundreds of rows) with the Drive API conversion step could approach the limit. Not observed in practice but worth monitoring.
 - **email and whatsapp = 0 in write-back:** Assumed this prevents dana from sending duplicate notifications. Not confirmed by testing with dana admins - verify before enabling hourly auto-push on a large batch.
@@ -645,7 +660,7 @@ The entire system runs on Google Apps Script + Google Sheets. No servers, no hos
 | `Invalid or tampered submission token` | TOKEN_SECRET changed after email was sent; or HTML escaping corrupted token | Ensure `<?!= JSON.stringify(token) ?>` in Form.html (not `<?= ?>`). Check if TOKEN_SECRET changed. |
 | `No pending PAN requests found` | Donor already submitted, or pan_status already updated | Check donors_input for email - all rows may already be `have_pan` |
 | `Edit POST HTTP 200 (expected 302)` | Dana edit form validation failed (field value error) | Check audit_log; inspect the donation_id manually in dana portal |
-| `Apps Script execution log: token mismatch expected/got lines` | See above | Both lines are logged when mismatch occurs - compare to diagnose |
+| Invalid token with no diagnostic token values | Token values are deliberately never logged | Check configuration and reopen the original donor link; do not log expected or received tokens |
 | `You do not have permission to call drive.files...` | Code uses `DriveApp`/`Drive.*` advanced service, which need the full `drive` scope | Use the Drive REST helpers in `DanaImport.gs` (`driveCreateSheetFromBlob_`, `driveDeleteFile_`) instead |
 | Gmail permission error | Wrong OAuth scope | Code uses `MailApp` (script.send_mail); if you see Gmail errors, check appsscript.json scopes |
 
@@ -662,7 +677,7 @@ The entire system runs on Google Apps Script + Google Sheets. No servers, no hos
 
 ### Change With Care
 
-- `Utils.gs / generateToken()` - changing token format invalidates all outstanding links
+- `Utils.gs / generateToken_()` - changing token format invalidates all outstanding links
 - `Code.gs / submitForm()` - changing which columns are written affects donors_input schema
 - `DanaImport.gs / mapColumns_()` - if dana adds/renames columns, update name-to-index mapping
 - `appsscript.json / oauthScopes` - adding scopes requires user re-authorization
@@ -687,8 +702,8 @@ The entire system runs on Google Apps Script + Google Sheets. No servers, no hos
 3. Run `testDanaImportLogin` to verify dana credentials still work
 4. Run `previewWriteBackToDana` (dry run) before any real write-back
 5. Check Apps Script Execution Log (left sidebar, clock icon) for any errors
-6. After committing, run `graphify update .` from the repo root to keep the
-   knowledge graph fresh (incremental, no API cost — see [docs/GRAPHIFY.md](docs/GRAPHIFY.md))
+6. After committing, refresh the knowledge graph through the graphify skill
+   pipeline with the `.gs` patch (see [docs/GRAPHIFY.md](docs/GRAPHIFY.md)).
 
 ### Credential Rotation
 

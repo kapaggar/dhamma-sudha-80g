@@ -1,5 +1,16 @@
 // Utils.gs
 
+// Bound editor/menu/dialog/trigger context is unavailable in a web-app RPC.
+// Keep this check before any admin side effect, including in trigger wrappers.
+// https://developers.google.com/apps-script/guides/bound#special_methods
+function requireAdminContext_() {
+  let active = null;
+  try { active = SpreadsheetApp.getActiveSpreadsheet(); } catch (_) {}
+  if (!active || active.getId() !== PropertiesService.getScriptProperties().getProperty('SHEET_ID')) {
+    throw new Error('This action is available only from the bound spreadsheet. Open the 80G Admin menu.');
+  }
+}
+
 /**
  * Recipient for trigger-failure alert emails. Reads the ADMIN_EMAIL Script
  * Property; returns '' (alert silently skipped) when unset. Replaces
@@ -14,7 +25,7 @@ function getAdminEmail_() {
  * Generate a signed token for email.
  * One donor = one form link = one token (regardless of how many donations).
  */
-function generateToken(email) {
+function generateToken_(email) {
   const secret = PropertiesService.getScriptProperties().getProperty('TOKEN_SECRET');
   if (!secret) throw new Error('TOKEN_SECRET script property not configured.');
   const payload = email.toLowerCase().trim();
@@ -24,22 +35,10 @@ function generateToken(email) {
 }
 
 function validateToken(token, email) {
-  if (!token || !email) {
-    Logger.log('validateToken: missing token or email. token=' + !!token + ' email=' + !!email);
-    return false;
-  }
+  if (typeof token !== 'string' || typeof email !== 'string' || !token || !email.trim()) return false;
   try {
-    const expected = generateToken(email);
-    const match = token === expected;
-    if (!match) {
-      Logger.log('validateToken mismatch for email=' + email);
-      Logger.log('  expected: ' + expected);
-      Logger.log('  got:      ' + token);
-      Logger.log('  expected length: ' + expected.length + ', got length: ' + token.length);
-    }
-    return match;
-  } catch (e) {
-    Logger.log('validateToken error: ' + e.message);
+    return token === generateToken_(email);
+  } catch (_) {
     return false;
   }
 }
@@ -50,7 +49,7 @@ function validateAndNormalizePAN(raw) {
   }
   const normalized = raw.toString().trim().toUpperCase().replace(/\s+/g, '');
   if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(normalized)) {
-    return { valid: false, error: 'PAN format invalid (expected ABCDE1234F). Got: ' + normalized };
+    return { valid: false, error: 'PAN must contain 5 letters, 4 digits, then 1 letter.' };
   }
   return { valid: true, pan: normalized };
 }

@@ -195,6 +195,8 @@ Token = `base64url(email) + "." + hex(HMAC-SHA256(email, TOKEN_SECRET))`
 - Admin views (`admin_review`) show masked PAN (`ABCDE****F`)
 - Full PAN only shown in `ready_for_80g` export (which requires being logged into the Google account)
 - PAN is never included in email body (link-based collection only)
+- New imports mask PAN in `id_value`; full PAN remains in `pan_collected`. Existing rows are not migrated automatically
+- Invalid source PAN is not classified as `have_pan`; a valid PAN is usable even when email is missing. Export validates legacy PAN values before inclusion
 
 ### Dana Credentials
 
@@ -205,8 +207,13 @@ Token = `base64url(email) + "." + hex(HMAC-SHA256(email, TOKEN_SECRET))`
 ### Web App Access
 
 - Web app is `ANYONE_ANONYMOUS` (donor form must be accessible without Google login)
-- Security enforced entirely by the HMAC token
-- No rate limiting (Apps Script limitation - UrlFetchApp calls are from Google IPs)
+- Donor reads/submissions require the HMAC token; token generation and credential reading are private helpers (trailing underscore), unreachable from `google.script.run`
+- Admin entry points check `requireAdminContext_()` before side effects. They require the active bound spreadsheet to match `SHEET_ID`. This preserves existing menu/trigger names without adding scopes; anonymous web-app calls have no bound context
+- This project must remain container-bound. Apps Script API executions and standalone copies cannot perform admin actions through this gate
+- No explicit rate limiting is implemented for donor form requests
+
+Google documents [private server functions](https://developers.google.com/apps-script/guides/html/communication#private_functions)
+and the [bound contexts where active-file methods work](https://developers.google.com/apps-script/guides/bound#special_methods).
 
 ## Dana Portal Specifics
 
@@ -239,7 +246,7 @@ All triggers are installed at runtime, not defined in code at deploy-time.
 | Hourly PAN push | `autoWriteBackHourly` | `80G Admin → Enable Hourly Auto-Push` |
 | Donation Day 10-min tick | `donationDayTick` | `80G Admin → 5. Donation Day → Enable` |
 
-**Donation Day mode** (`DonationDay.gs`): the tick runs import → pending emails → WhatsApp nudges every 10 minutes and self-expires 3 hours after enable (expiry stored in the `DONATION_DAY_UNTIL` Script Property; past it, the tick uninstalls its own trigger, clears the property, audit-logs `donation_day_auto_off`, and emails the admin). Enabling removes the hourly `autoSendEmailsHourly` / `autoSendWhatsAppNudgeHourly` triggers for the window — neither send path takes a lock, so an hourly run overlapping a tick could double-send. They are not auto-restored; re-enable them from menus 2 and 4 afterwards if a backlog remains. Within the tick, sends run under `LockService` `tryLock(0)` (skipped if busy) while import runs lock-free (idempotent via `receipt_no` dedup), so a tick never starves `submitForm`'s 20s `waitLock` during peak donor traffic.
+**Donation Day mode** (`DonationDay.gs`): the tick runs import → pending emails → WhatsApp nudges every 10 minutes and self-expires 3 hours after enable (expiry stored in the `DONATION_DAY_UNTIL` Script Property; past it, the tick uninstalls its own trigger, clears the property, audit-logs `donation_day_auto_off`, and emails the admin). Enabling removes the hourly `autoSendEmailsHourly` / `autoSendWhatsAppNudgeHourly` triggers for the window — neither send path takes a lock, so an hourly run overlapping a tick could double-send. They are not auto-restored; re-enable them from menus 2 and 4 afterwards if a backlog remains. Within the tick, sends run under `LockService` `tryLock(0)` (skipped if busy) while portal fetching and XLS conversion stay outside the lock. Import takes a script lock only for the shared-sheet receipt check and append, flushing before release. This prevents concurrent imports from inserting duplicate receipts without holding the lock during portal network calls.
 
 ## Performance Notes
 

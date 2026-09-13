@@ -18,7 +18,8 @@ function getEmailMaxPerRun_() {
 }
 
 function sendPendingEmails(silent) {
-  const ss = getSpreadsheet();
+  requireAdminContext_();
+  const ss = getSpreadsheet_();
   const donorsSheet = ss.getSheetByName('donors_input');
   if (!donorsSheet || donorsSheet.getLastRow() < 2) {
     if (!silent) { try { SpreadsheetApp.getUi().alert('No donor records.'); } catch (_) {} }
@@ -80,7 +81,7 @@ function sendPendingEmails(silent) {
     if (remaining - EMAIL_QUOTA_BUFFER <= 0) { stopReason = 'daily email quota nearly exhausted'; break; }
 
     const info = byEmail[email];
-    const token = generateToken(email);
+    const token = generateToken_(email);
     const link = webAppUrl + '?email=' + encodeURIComponent(email) + '&token=' + encodeURIComponent(token);
     const receiptList = info.receipts.map(r => r.receiptNo).join(',');
     const nowIso = new Date().toISOString();
@@ -158,7 +159,8 @@ function writeEmailLogRow_(logSheet, logRowByEmail, email, receiptList, nowIso, 
 }
 
 function sendReminders() {
-  const ss = getSpreadsheet();
+  requireAdminContext_();
+  const ss = getSpreadsheet_();
   const logSheet = ss.getSheetByName('email_log');
   if (!logSheet || logSheet.getLastRow() < 2) return;
 
@@ -214,7 +216,7 @@ function sendReminders() {
     if (remaining - EMAIL_QUOTA_BUFFER <= 0) break;
 
     const donorName = nameByEmail[email] || 'Donor';
-    const token = generateToken(email);
+    const token = generateToken_(email);
     const link = webAppUrl + '?email=' + encodeURIComponent(email) + '&token=' + encodeURIComponent(token);
     const num = count + 1;
 
@@ -357,6 +359,7 @@ function escapeHtml_(s) {
 // ---------------------------------------------------------------------------
 
 function autoSendEmailsHourly() {
+  requireAdminContext_();
   try {
     const r = sendPendingEmails(true);
     Logger.log('autoSendEmailsHourly: ' + JSON.stringify(r));
@@ -374,6 +377,7 @@ function autoSendEmailsHourly() {
 }
 
 function installHourlyEmailTrigger() {
+  requireAdminContext_();
   const triggers = ScriptApp.getProjectTriggers();
   let removed = 0;
   triggers.forEach(t => {
@@ -390,6 +394,7 @@ function installHourlyEmailTrigger() {
 }
 
 function disableHourlyEmailTrigger() {
+  requireAdminContext_();
   const triggers = ScriptApp.getProjectTriggers();
   let removed = 0;
   triggers.forEach(t => {
@@ -412,7 +417,8 @@ function disableHourlyEmailTrigger() {
 //     only - the operational state is corrected on the next send pass).
 // Read-only except for backfilling missing audit rows. Run from the menu.
 function reconcileEmailLogs() {
-  const ss = getSpreadsheet();
+  requireAdminContext_();
+  const ss = getSpreadsheet_();
   const logSheet = ss.getSheetByName('email_log');
   const auditSheet = ss.getSheetByName('audit_log');
   if (!logSheet || logSheet.getLastRow() < 2) {

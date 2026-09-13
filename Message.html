@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <?!= HtmlService.createHtmlOutputFromFile('UiStyles').getContent() ?>
+</head>
+<body>
+  <div class="page">
+    <header class="masthead"><div><div class="brand-name"><?= centerName ?></div><div class="eyebrow">80G donation certificate</div></div></header>
+    <main class="card message"><h1><?= title ?></h1><p><?= message ?></p><p class="next-step">If you need help, please contact the centre.</p></main>
+    <footer class="footer">With metta · Thank you for your support.</footer>
+  </div>
+</body>
+</html>

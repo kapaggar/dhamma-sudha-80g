@@ -1,6 +1,6 @@
 // Code.gs
 
-function getSpreadsheet() {
+function getSpreadsheet_() {
   const id = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
   if (!id) throw new Error('SHEET_ID script property not set.');
   return SpreadsheetApp.openById(id);
@@ -16,7 +16,7 @@ function getCenterName() {
 // ---------------------------------------------------------------------------
 
 function doGet(e) {
-  const p = e.parameter;
+  const p = (e && e.parameter) || {};
   const token = p.token;
   const email = p.email;
 
@@ -27,7 +27,7 @@ function doGet(e) {
     return errorPage('Invalid Link', 'This link appears to be invalid or tampered. Please use the original link from your email.');
   }
 
-  const ss = getSpreadsheet();
+  const ss = getSpreadsheet_();
   const donorsSheet = ss.getSheetByName('donors_input');
 
   if (!donorsSheet || donorsSheet.getLastRow() < 2) {
@@ -56,8 +56,8 @@ function doGet(e) {
   }
 
   // Already submitted? (no need_pan rows but some have_pan rows)
-  const alreadySubmitted = pendingReceipts.length === 0 && data.some(r =>
-    (r[4] || '').toString().toLowerCase().trim() === emailLower);
+  const alreadySubmitted = pendingReceipts.length === 0 && data.slice(1).some(r =>
+    (r[4] || '').toString().toLowerCase().trim() === emailLower && r[20] === 'have_pan');
 
   // Get the first mobile we find for this email
   let mobile = '';
@@ -77,14 +77,17 @@ function doGet(e) {
   tmpl.centerName = getCenterName();
 
   return tmpl.evaluate()
-    .setTitle('PAN Submission - 80G Certificate');
+    .setTitle('PAN Submission - 80G Certificate')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
 function errorPage(title, msg) {
-  return HtmlService.createHtmlOutput(
-    `<div style="font-family:sans-serif;max-width:500px;margin:60px auto;padding:20px">
-       <h2 style="color:#c00">${title}</h2><p style="color:#555;margin-top:10px">${msg}</p></div>`
-  ).setTitle(title);
+  const template = HtmlService.createTemplateFromFile('Message');
+  template.title = title;
+  template.message = msg;
+  template.centerName = getCenterName();
+  return template.evaluate().setTitle(title)
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
 function formatDateForDisplay_(d) {
@@ -100,16 +103,10 @@ function formatDateForDisplay_(d) {
 // ---------------------------------------------------------------------------
 
 function submitForm(data) {
-  // Diagnostic logging for token issues
-  Logger.log('submitForm called. email=' + JSON.stringify(data.email) +
-    ' token length=' + (data.token ? data.token.length : 0));
-
-  if (!validateToken(data.token, data.email)) {
-    Logger.log('Token mismatch. Expected: ' + generateToken(data.email || ''));
-    Logger.log('Got:              ' + data.token);
+  if (!data || typeof data !== 'object' || !validateToken(data.token, data.email)) {
     return { success: false, error: 'Invalid or tampered submission token.' };
   }
-  if (!data.consent) {
+  if (data.consent !== true) {
     return { success: false, error: 'Consent is required to proceed.' };
   }
   if (!data.pan) {
@@ -130,10 +127,14 @@ function submitForm(data) {
   }
 
   try {
-    const ss = getSpreadsheet();
+    const ss = getSpreadsheet_();
     const donorsSheet = ss.getSheetByName('donors_input');
     if (!donorsSheet || donorsSheet.getLastRow() < 2) {
       return { success: false, error: 'No records found.' };
+    }
+    const subSheet = ss.getSheetByName('submissions');
+    if (!subSheet) {
+      return { success: false, error: 'The form is not ready to save details. Please contact the centre.' };
     }
 
     const emailLower = data.email.toLowerCase().trim();
@@ -147,7 +148,7 @@ function submitForm(data) {
     for (let i = 1; i < allData.length; i++) {
       const row = allData[i];
       if ((row[4] || '').toString().toLowerCase().trim() !== emailLower) continue;
-      if (!donorName && row[3]) donorName = row[3];
+      if (!donorName && row[3]) donorName = String(row[3]);
       if (!donorMobile && row[5]) donorMobile = row[5];
 
       if (row[20] !== 'need_pan') continue;
@@ -163,7 +164,6 @@ function submitForm(data) {
       return { success: false, error: 'No pending PAN requests found. You may have already submitted.' };
     }
 
-    const subSheet = ss.getSheetByName('submissions');
     const subId = Utilities.getUuid();
     subSheet.appendRow([
       subId, emailLower, donorMobile, pan, donorName.toUpperCase(),
@@ -187,7 +187,7 @@ function submitForm(data) {
 
     return { success: true, count: updatedReceipts.length };
   } finally {
-    lock.releaseLock();
+    try { SpreadsheetApp.flush(); } finally { lock.releaseLock(); }
   }
 }
 
@@ -196,7 +196,8 @@ function submitForm(data) {
 // ---------------------------------------------------------------------------
 
 function migrateSchema() {
-  const ss = getSpreadsheet();
+  requireAdminContext_();
+  const ss = getSpreadsheet_();
   const sheet = ss.getSheetByName('donors_input');
   if (!sheet) { SpreadsheetApp.getUi().alert('donors_input sheet not found.'); return; }
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
@@ -215,7 +216,8 @@ function migrateSchema() {
 }
 
 function initSheets() {
-  const ss = getSpreadsheet();
+  requireAdminContext_();
+  const ss = getSpreadsheet_();
 
   getOrCreateSheet(ss, 'donors_input', [
     'receipt_no', 'txn_date', 'created_on',

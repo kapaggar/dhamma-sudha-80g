@@ -5,7 +5,7 @@
 
 // Reads a Script Property and base64-decodes it. Avoids plaintext in the
 // Script Properties UI for screen-share scenarios. Not a security boundary.
-function _readProp(key) {
+function readProp_(key) {
   const raw = PropertiesService.getScriptProperties().getProperty(key);
   if (!raw) return null;
   try {
@@ -26,13 +26,14 @@ const DANA_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWe
  * Manual import - opens HTML dialog with pre-filled date pickers.
  */
 function importFromDanaPortal() {
+  requireAdminContext_();
   const range = getDefaultRange_();
   const tmpl = HtmlService.createTemplateFromFile('ImportDialog');
   tmpl.defaultStart = range.start;
   tmpl.defaultEnd = range.end;
   tmpl.lastImport = range.lastImportEnd || 'never';
 
-  const html = tmpl.evaluate().setWidth(420).setHeight(320);
+  const html = tmpl.evaluate().setWidth(520).setHeight(540);
   SpreadsheetApp.getUi().showModalDialog(html, 'Import from Dana Portal');
 }
 
@@ -40,8 +41,9 @@ function importFromDanaPortal() {
  * Called from ImportDialog.html when user clicks "Import".
  */
 function runImportFromDialog(startDate, endDate) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
-    return { success: false, error: 'Invalid date format.' };
+  requireAdminContext_();
+  if (!isImportDate_(startDate) || !isImportDate_(endDate) || startDate > endDate) {
+    return { success: false, error: 'Choose valid dates with the start date on or before the end date.' };
   }
   try {
     const result = runDanaImport_(startDate, endDate);
@@ -51,10 +53,17 @@ function runImportFromDialog(startDate, endDate) {
   }
 }
 
+function isImportDate_(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(value + 'T00:00:00.000Z');
+  return !isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
 /**
  * Time-triggered monthly auto-import.
  */
 function autoImportMonthly() {
+  requireAdminContext_();
   const range = getDefaultRange_();
   try {
     const result = runDanaImport_(range.start, range.end);
@@ -84,8 +93,9 @@ function autoImportMonthly() {
  * to pre-existing Drive files).
  */
 function importXlsFromComputer() {
+  requireAdminContext_();
   const html = HtmlService.createTemplateFromFile('UploadDialog')
-    .evaluate().setWidth(420).setHeight(300);
+    .evaluate().setWidth(520).setHeight(500);
   SpreadsheetApp.getUi().showModalDialog(html, 'Import XLS from Computer');
 }
 
@@ -93,11 +103,23 @@ function importXlsFromComputer() {
  * Called from UploadDialog.html with the XLS file contents as base64.
  */
 function runUploadImport(base64Data, filename) {
+  requireAdminContext_();
   try {
+    const maxBytes = 10 * 1024 * 1024;
+    const extension = typeof filename === 'string' && filename.match(/\.(xlsx?)$/i);
+    if (!extension) return { success: false, error: 'Choose an XLS or XLSX report.' };
+    if (typeof base64Data !== 'string' || !base64Data || base64Data.length > 4 * Math.ceil(maxBytes / 3)) {
+      return { success: false, error: 'Choose a non-empty report no larger than 10 MB.' };
+    }
+    const bytes = Utilities.base64Decode(base64Data);
+    if (!bytes.length || bytes.length > maxBytes) {
+      return { success: false, error: 'Choose a non-empty report no larger than 10 MB.' };
+    }
+    const xlsx = extension[1].toLowerCase() === 'xlsx';
     const blob = Utilities.newBlob(
-      Utilities.base64Decode(base64Data),
-      'application/vnd.ms-excel',
-      filename || 'dana_upload.xls');
+      bytes,
+      xlsx ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'application/vnd.ms-excel',
+      xlsx ? 'dana_upload.xlsx' : 'dana_upload.xls');
     const tempId = driveCreateSheetFromBlob_(blob);
     try {
       const result = processXlsFile_(tempId, {});
@@ -195,7 +217,7 @@ function getDefaultRange_() {
 function runDanaImport_(startDate, endDate) {
   const baseUrl = PropertiesService.getScriptProperties().getProperty('DANA_URL');
   const user    = PropertiesService.getScriptProperties().getProperty('DANA_USER');
-  const pass    = _readProp('DANA_PASS');
+  const pass    = readProp_('DANA_PASS');
   if (!baseUrl || !user || !pass) {
     throw new Error('Missing Script Properties: DANA_URL, DANA_USER, DANA_PASS');
   }
@@ -541,6 +563,18 @@ function mapColumns_(headers) {
 }
 
 function processRows_(data, idx, receiptToDonationId) {
+  // Fetch/conversion happens before this short critical section. Serialize the
+  // receipt check and append with other imports and donor PAN submissions.
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    return processRowsLocked_(data, idx, receiptToDonationId);
+  } finally {
+    try { SpreadsheetApp.flush(); } finally { lock.releaseLock(); }
+  }
+}
+
+function processRowsLocked_(data, idx, receiptToDonationId) {
   const ss = SpreadsheetApp.openById(
     PropertiesService.getScriptProperties().getProperty('SHEET_ID'));
   const donorsSheet = ss.getSheetByName('donors_input');
@@ -552,21 +586,27 @@ function processRows_(data, idx, receiptToDonationId) {
     rNos.forEach(r => { if (r[0]) existing.add(r[0].toString().trim()); });
   }
 
-  const emailToPan = {};
+  const emailToPan = Object.create(null);
   if (donorsSheet.getLastRow() > 1) {
     const allRows = donorsSheet.getDataRange().getValues();
     for (let i = 1; i < allRows.length; i++) {
       const row = allRows[i];
       const email = (row[4] || '').toString().toLowerCase().trim();
       if (!email) continue;
-      if (row[18]) emailToPan[email] = { pan: row[18], pan_name: row[19] || '' };
-      else if ((row[16] || '').toString().toUpperCase() === 'PAN' && row[17]) {
-        emailToPan[email] = {
-          pan: row[17].toString().toUpperCase().replace(/\s+/g, ''),
-          pan_name: ''
-        };
-      }
+      const pan = validateAndNormalizePAN(row[18] ||
+        (toStr_(row[16]).toUpperCase() === 'PAN' ? row[17] : ''));
+      if (pan.valid) emailToPan[email] = { pan: pan.pan, pan_name: row[19] || '' };
     }
+  }
+
+  // Pre-index valid PANs so repeats within this file do not depend on row order.
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const email = toStr_(row[idx.email]).toLowerCase();
+    if (!toStr_(row[idx.receiptNo]) || !email || emailToPan[email] ||
+        toStr_(row[idx.idType]).toUpperCase() !== 'PAN') continue;
+    const pan = validateAndNormalizePAN(row[idx.idValue]);
+    if (pan.valid) emailToPan[email] = { pan: pan.pan, pan_name: '' };
   }
 
   const now = new Date().toISOString();
@@ -590,7 +630,7 @@ function processRows_(data, idx, receiptToDonationId) {
 
     let amount = 0, paymentMode = '';
     idx.paymentCols.forEach(p => {
-      const v = parseFloat(row[p.col]);
+      const v = parseAmount_(row[p.col]);
       if (!isNaN(v) && v > 0) {
         amount += v;
         if (!paymentMode) paymentMode = p.name;
@@ -598,15 +638,16 @@ function processRows_(data, idx, receiptToDonationId) {
     });
 
     let panCollected = '', panName = '', panStatus;
-    if (!email) {
-      panStatus = 'no_email'; stats.noEmail++;
-    } else if (idType.toUpperCase() === 'PAN' && idValue) {
-      panCollected = idValue.toUpperCase().replace(/\s+/g, '');
+    const importedPan = validateAndNormalizePAN(idType.toUpperCase() === 'PAN' ? idValue : '');
+    if (importedPan.valid) {
+      panCollected = importedPan.pan;
       panStatus = 'have_pan'; stats.havePan++;
     } else if (emailToPan[email]) {
       panCollected = emailToPan[email].pan;
       panName = emailToPan[email].pan_name;
       panStatus = 'have_pan'; stats.autoFilled++;
+    } else if (!email) {
+      panStatus = 'no_email'; stats.noEmail++;
     } else {
       panStatus = 'need_pan'; stats.needPan++;
     }
@@ -629,7 +670,7 @@ function processRows_(data, idx, receiptToDonationId) {
       amount,
       idx.merchantRef >= 0 ? toStr_(row[idx.merchantRef]) : '',
       idType,
-      idValue,
+      idType.toUpperCase() === 'PAN' ? maskPAN(importedPan.valid ? importedPan.pan : '') : maskPanInText_(idValue),
       panCollected,
       panName,
       panStatus,
@@ -707,11 +748,12 @@ function formatDateTime_(v) {
  * Verbose login test - prints diagnostic info to log.
  */
 function testDanaImportLogin() {
+  requireAdminContext_();
   try {
     const cookie = loginToDana_(
       PropertiesService.getScriptProperties().getProperty('DANA_URL'),
       PropertiesService.getScriptProperties().getProperty('DANA_USER'),
-      _readProp('DANA_PASS'),
+      readProp_('DANA_PASS'),
       true  // verbose
     );
     Logger.log('=== LOGIN OK ===');
@@ -729,6 +771,7 @@ function testDanaImportLogin() {
  * Test the full flow: login, get form tokens, POST report query, GET excel.
  */
 function testDanaReportFetch() {
+  requireAdminContext_();
   try {
     const today = Utilities.formatDate(new Date(), 'Asia/Kolkata', 'yyyy-MM-dd');
     const result = runDanaImport_('2026-04-01', today);
@@ -744,25 +787,29 @@ function testDanaReportFetch() {
 
 /**
  * Parse the /donation-report HTML response to build a map of receipt_no -> donation_id.
- * Looks for /donation/edit/{id} links and finds the nearest ER[\d]+ receipt before each.
+ * Pair receipt and edit link only within the same table row. Ambiguous rows or
+ * conflicting mappings are skipped, never guessed across donor boundaries.
  */
 function parseReceiptToDonationIdMap_(html) {
   const map = {};
-  const editRe = /\/donation\/edit\/(\d+)/g;
+  const conflicts = new Set();
+  const rowRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
   let m;
-  const positions = [];
-  while ((m = editRe.exec(html)) !== null) {
-    positions.push({ donationId: m[1], pos: m.index });
+  while ((m = rowRe.exec(html)) !== null) {
+    const row = m[1];
+    const ids = [...new Set(Array.from(row.matchAll(/\/donation\/edit\/(\d+)\b/g), match => match[1]))];
+    const text = decodeHtml_(row.replace(/<[^>]+>/g, ' '));
+    const receipts = [...new Set(text.match(/\bER-?\d+\b/g) || [])];
+    if (ids.length !== 1 || receipts.length !== 1) continue;
+    const receipt = receipts[0];
+    if (conflicts.has(receipt)) continue;
+    if (map[receipt] && map[receipt] !== ids[0]) {
+      delete map[receipt];
+      conflicts.add(receipt);
+    } else {
+      map[receipt] = ids[0];
+    }
   }
-
-  positions.forEach(p => {
-    const start = Math.max(0, p.pos - 3000);
-    const region = html.substring(start, p.pos);
-    const localRe = /\b(ER-?\d+)\b/g;
-    let lastMatch = null, lm;
-    while ((lm = localRe.exec(region)) !== null) lastMatch = lm;
-    if (lastMatch) map[lastMatch[1]] = p.donationId;
-  });
 
   return map;
 }

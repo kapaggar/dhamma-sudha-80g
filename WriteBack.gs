@@ -18,16 +18,19 @@ const DANA_ID_TYPE_PAN = '1';   // From dana edit form HTML (1=PAN, 2=Aadhaar, 4
 // ---------------------------------------------------------------------------
 
 function previewWriteBackToDana() {
+  requireAdminContext_();
   const result = writeBackPANs_(true);
   showWriteBackResult_(result, true);
 }
 
 function pushPANsToDana() {
+  requireAdminContext_();
   const result = writeBackPANs_(false);
   showWriteBackResult_(result, false);
 }
 
 function autoWriteBackHourly() {
+  requireAdminContext_();
   // For time-trigger - no UI alerts, just logs
   try {
     const result = writeBackPANs_(false);
@@ -93,7 +96,7 @@ function writeBackPANs_(dryRun) {
 
     const baseUrl = PropertiesService.getScriptProperties().getProperty('DANA_URL');
     const user    = PropertiesService.getScriptProperties().getProperty('DANA_USER');
-    const pass    = _readProp('DANA_PASS');
+    const pass    = readProp_('DANA_PASS');
 
     // Only touch the live portal when necessary: a real push always needs a session;
     // a dry run needs one only to look up missing donation_ids. Keeps Preview usable
@@ -113,7 +116,7 @@ function writeBackPANs_(dryRun) {
       });
     }
 
-    const ss = getSpreadsheet();
+    const ss = getSpreadsheet_();
     const sheet = ss.getSheetByName('donors_input');
     let succeeded = 0, failed = 0, skipped = 0, consec = 0;
     let circuitBreak = null;
@@ -161,7 +164,7 @@ function writeBackPANs_(dryRun) {
 
         auditLog(ss, 'writeBack', 'dana_updated',
           c.receiptNo, 'd_id_type+d_id_no',
-          c.currentIdType + ':' + (c.currentIdValue || ''),
+          c.currentIdType + ':[REDACTED]',
           'PAN:' + maskPAN(pv.pan),
           c.donationId);
 
@@ -224,7 +227,7 @@ function writeBackPANs_(dryRun) {
 // ---------------------------------------------------------------------------
 
 function findWriteBackCandidates_() {
-  const ss = getSpreadsheet();
+  const ss = getSpreadsheet_();
   const sheet = ss.getSheetByName('donors_input');
   if (!sheet || sheet.getLastRow() < 2) return [];
   if (sheet.getLastColumn() < 26) {
@@ -245,7 +248,11 @@ function findWriteBackCandidates_() {
 
     if (panStatus !== 'have_pan') continue;          // Need PAN collected
     if (!pan) continue;                              // Belt-and-suspenders
-    if (idType === 'PAN') continue;                  // Dana already has PAN
+    // Invalid source PANs still need repair after the donor submits a valid one.
+    // New imports mask R; legacy imports may still hold the full source PAN.
+    const sourcePan = validateAndNormalizePAN(idValue);
+    if (idType === 'PAN' && (sourcePan.valid ||
+        (validateAndNormalizePAN(pan).valid && idValue === maskPAN(pan)))) continue;
     if (danaUpdatedAt) continue;                     // Already pushed
 
     candidates.push({
@@ -385,6 +392,7 @@ function postDonationEdit_(baseUrl, sessionCookie, donationId, newPan) {
   // In that ambiguous case, proceed with the (idempotent) write instead.
   const idTypeMeta = (values.__selectMeta || {}).d_id_type;
   if ((values.d_id_type || '').toString().trim() === DANA_ID_TYPE_PAN &&
+      validateAndNormalizePAN(values.d_id_no).valid &&
       (!idTypeMeta || idTypeMeta.hasExplicitSelected)) {
     throw new Error('ALREADY_PAN: dana already has id_type=PAN for this donation (updated in the portal) - no write needed.');
   }
@@ -575,7 +583,7 @@ const DANA_REQUIRED_FIELDS = ['d_course'];
 // label in __selectMeta, so here we judge the label/value pair:
 //   - "Non Course" (first option, value="0", label not placeholder) -> real choice, POST.
 //   - "- Select -" / "None" / "Choose" (placeholder label) -> unset, SKIP.
-//   - a select whose effective value is empty AND whose label is blank/placeholder
+//   - a select whose effective value is empty, regardless of label
 //     -> unset, SKIP (would risk the 1048 NOT-NULL write).
 // Non-select required fields are missing when blank, as before.
 function findEmptyRequiredFields_(values) {
@@ -586,11 +594,9 @@ function findEmptyRequiredFields_(values) {
     if (sm) {
       const label = (sm.label || '').toString();
       const val = (sm.value === undefined || sm.value === null) ? '' : sm.value.toString();
-      const isPlaceholder = !label || SELECT_PLACEHOLDER_LABEL_RE.test(label);
-      // Real choice: a non-placeholder label. A non-empty value with no label is also
-      // accepted (defensive: dana could emit value-only options). Only a placeholder,
-      // or an empty value with no usable label, counts as missing.
-      const realChoice = (!isPlaceholder) || (val.trim() !== '' && label.trim() !== '');
+      // A placeholder stays unset even with value="0"; a real label cannot make
+      // value="" safe for a required database field. Real "Non Course"/"0" passes.
+      const realChoice = val.trim() !== '' && !SELECT_PLACEHOLDER_LABEL_RE.test(label);
       if (!realChoice) missing.push(f);
     } else {
       const v = values[f];
@@ -621,6 +627,7 @@ function decodeHtml_(s) {
 // ---------------------------------------------------------------------------
 
 function installHourlyTrigger() {
+  requireAdminContext_();
   // Remove existing triggers for autoWriteBackHourly
   const triggers = ScriptApp.getProjectTriggers();
   let removed = 0;
@@ -642,6 +649,7 @@ function installHourlyTrigger() {
 }
 
 function disableHourlyTrigger() {
+  requireAdminContext_();
   const triggers = ScriptApp.getProjectTriggers();
   let removed = 0;
   triggers.forEach(t => {
@@ -663,9 +671,10 @@ function disableHourlyTrigger() {
 // Pass doPost=true to also attempt the POST and capture dana's full response
 // (still masked, still no sheet write) when you need the exact SQLSTATE/column.
 function diagnoseDanaWriteBack(donationId, doPost) {
+  requireAdminContext_();
   const baseUrl = PropertiesService.getScriptProperties().getProperty('DANA_URL');
   const user    = PropertiesService.getScriptProperties().getProperty('DANA_USER');
-  const pass    = _readProp('DANA_PASS');
+  const pass    = readProp_('DANA_PASS');
   const cookie  = loginToDana_(baseUrl, user, pass, false);
 
   const editUrl = baseUrl + '/donation/edit/' + donationId;
@@ -736,7 +745,7 @@ function diagnoseDanaWriteBack(donationId, doPost) {
 // pan_collected (col S) of the donors_input row whose dana_donation_id (col Y)
 // matches, or '' if no such row. Used by the diagnostic POST probe only.
 function findCollectedPanForDonationId_(donationId) {
-  const sheet = getSpreadsheet().getSheetByName('donors_input');
+  const sheet = getSpreadsheet_().getSheetByName('donors_input');
   if (!sheet || sheet.getLastRow() < 2) return '';
   const data = sheet.getDataRange().getValues();
   const want = (donationId == null ? '' : donationId).toString().trim();
@@ -751,6 +760,7 @@ function findCollectedPanForDonationId_(donationId) {
 
 // Menu wrapper: prompt for a donation_id and run the GET-only field dump.
 function promptDiagnoseDanaWriteBack() {
+  requireAdminContext_();
   const ui = SpreadsheetApp.getUi();
   const resp = ui.prompt('Diagnose write-back',
     'Enter the dana donation_id to inspect (e.g. 10592). Field values are logged to the Apps Script execution log; PAN is masked. No data is written.',

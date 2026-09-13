@@ -1,6 +1,7 @@
 // Tests.gs
 
 function runAllTests() {
+  requireAdminContext_();
   let pass = 0, fail = 0;
 
   function assert(name, cond, detail) {
@@ -32,7 +33,7 @@ function runAllTests() {
 
   // Token tests
   try {
-    var tok = generateToken('test@example.com');
+    var tok = generateToken_('test@example.com');
     assert('valid token passes', validateToken(tok, 'test@example.com') === true);
     assert('tampered token fails', validateToken(tok + 'x', 'test@example.com') === false);
     assert('wrong email fails', validateToken(tok, 'other@example.com') === false);
@@ -67,6 +68,7 @@ function runAllTests() {
 }
 
 function testConsentRequired() {
+  requireAdminContext_();
   var result = submitForm({
     token: 'dummy', email: 'x@x.com',
     name: 'Test', mobile: '9999999999',
@@ -77,7 +79,7 @@ function testConsentRequired() {
 }
 
 // NOTE: testDanaImportLogin() lives in DanaImport.gs (verbose, decodes DANA_PASS
-// via _readProp). A duplicate previously defined here passed the raw base64
+// via readProp_). A duplicate previously defined here passed the raw base64
 // DANA_PASS straight to loginToDana_ and, because .gs files share one global
 // scope, could shadow the real one and make the login self-test fail even with
 // correct credentials. Do not re-add it here.

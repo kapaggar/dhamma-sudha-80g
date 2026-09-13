@@ -1,89 +1,103 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <base target="_top">
-  <style>
-    body{font-family:Arial,sans-serif;padding:16px;margin:0;font-size:13px;color:#333}
-    h3{margin:0 0 12px 0;color:#3c6e47}
-    .info{background:#eef4ee;padding:8px 12px;border-radius:4px;margin-bottom:14px;font-size:12px;color:#555}
-    input[type=file]{width:100%;font-size:13px;margin-bottom:12px}
-    .actions{margin-top:16px;text-align:right}
-    button{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:13px;margin-left:8px}
-    .primary{background:#3c6e47;color:#fff}
-    .primary:hover{background:#2e5538}
-    .primary:disabled{background:#aaa;cursor:default}
-    .secondary{background:#eee;color:#333}
-    .status{margin-top:14px;padding:10px;border-radius:4px;font-size:12px;display:none;white-space:pre-line}
-    .status.ok{background:#d9ead3;color:#2d6a2d;display:block}
-    .status.err{background:#f4cccc;color:#9b1c1c;display:block}
-    .status.loading{background:#fff3cd;color:#856404;display:block}
-  </style>
+  <?!= HtmlService.createHtmlOutputFromFile('UiStyles').getContent() ?>
 </head>
-<body>
-  <h3>Import XLS from Computer</h3>
-  <div class="info">
-    Download the XLS report from the dana portal, then choose it here.
-  </div>
-  <input type="file" id="file" accept=".xls,.xlsx">
-  <div class="actions">
-    <button class="secondary" onclick="google.script.host.close()">Cancel</button>
-    <button class="primary" id="goBtn" onclick="runImport()">Import</button>
-  </div>
-  <div class="status" id="status"></div>
-
+<body class="dialog">
+  <main>
+    <div class="eyebrow">80G admin · Import donations</div>
+    <h1>Import a downloaded report.</h1>
+    <p class="description">Download the donation report from the Dana portal, then choose the file from your computer.</p>
+    <form id="uploadForm" novalidate>
+      <div class="file-area">
+        <label for="file">Donation report</label>
+        <input type="file" id="file" accept=".xls,.xlsx" aria-describedby="fileHelp fileSummary" required>
+        <p class="hint" id="fileHelp">XLS or XLSX · Up to 10 MB</p>
+        <p class="file-summary" id="fileSummary" aria-live="polite"></p>
+      </div>
+      <p class="hint">Existing receipts are skipped. Importing may take 30–60 seconds.</p>
+      <div class="actions">
+        <button type="button" class="secondary" id="cancelBtn" onclick="google.script.host.close()">Cancel</button>
+        <button type="submit" class="primary" id="goBtn"><span id="spinner" class="spinner" aria-hidden="true" hidden></span><span id="goLabel">Import report</span></button>
+      </div>
+    </form>
+    <div class="status" id="status" role="status" aria-live="polite" tabindex="-1" hidden></div>
+  </main>
 <script>
   var MAX_BYTES = 10 * 1024 * 1024;
+  var busy = false;
+  var complete = false;
+  var form = document.getElementById('uploadForm');
+  var input = document.getElementById('file');
 
-  function runImport() {
-    var input = document.getElementById('file');
-    if (!input.files || !input.files.length) {
-      showStatus('err', 'Please choose a file.'); return;
+  function setBusy(value) {
+    busy = value;
+    form.setAttribute('aria-busy', String(value));
+    ['goBtn', 'cancelBtn', 'file'].forEach(function(id) { document.getElementById(id).disabled = value; });
+    document.getElementById('spinner').hidden = !value;
+    document.getElementById('goLabel').textContent = value ? 'Importing…' : complete ? 'Done' : 'Import report';
+  }
+  function fail(message) {
+    setBusy(false);
+    showStatus('err', message || 'Import failed. Please try again.');
+    document.getElementById('status').focus();
+  }
+  function runImport(event) {
+    if (event) event.preventDefault();
+    if (busy) return;
+    if (complete) { google.script.host.close(); return; }
+    var file = input.files && input.files[0];
+    if (!file || !/\.xlsx?$/i.test(file.name)) {
+      showStatus('err', 'Choose an XLS or XLSX report.'); input.focus(); return;
     }
-    var file = input.files[0];
-    if (file.size > MAX_BYTES) {
-      showStatus('err', 'File too large (max 10 MB).'); return;
+    if (!file.size || file.size > MAX_BYTES) {
+      showStatus('err', 'Choose a non-empty report no larger than 10 MB.'); input.focus(); return;
     }
-    showStatus('loading', 'Importing... this may take 30-60 seconds.');
-    document.getElementById('goBtn').disabled = true;
-
+    setBusy(true);
+    showStatus('loading', 'Reading your file. Keep this window open until the import finishes.');
     var reader = new FileReader();
     reader.onload = function() {
-      var base64 = reader.result.split(',')[1];
-      google.script.run
-        .withSuccessHandler(function(res) {
-          if (res.success) {
+      showStatus('loading', 'Importing your report. Existing receipts will be skipped.');
+      try {
+        var base64 = reader.result.split(',')[1];
+        google.script.run
+          .withSuccessHandler(function(res) {
+            if (!res || !res.success || !res.result) { fail(res && res.error); return; }
+            complete = true;
+            setBusy(false);
+            input.value = '';
+            input.disabled = true;
+            document.getElementById('cancelBtn').hidden = true;
             var r = res.result;
-            showStatus('ok',
-              'Done.\n' +
-              'Total: ' + r.total + '  |  Added: ' + r.added + '  |  Skipped: ' + r.skipped + '\n' +
-              'Need PAN: ' + r.needPan + '  |  Have PAN: ' + r.havePan + '  |  Auto-filled: ' + r.autoFilled);
-            document.getElementById('goBtn').textContent = 'Close';
-            document.getElementById('goBtn').onclick = function() { google.script.host.close(); };
-            document.getElementById('goBtn').disabled = false;
-          } else {
-            showStatus('err', res.error);
-            document.getElementById('goBtn').disabled = false;
-          }
-        })
-        .withFailureHandler(function(err) {
-          showStatus('err', err.message || 'Unknown error');
-          document.getElementById('goBtn').disabled = false;
-        })
-        .runUploadImport(base64, file.name);
+            showStatus('ok', 'Import complete\n' + r.added + ' added · ' + r.skipped + ' already in your sheet · ' + r.total + ' reviewed\n' +
+              r.needPan + ' need PAN · ' + r.havePan + ' have PAN · ' + r.autoFilled + ' auto-filled\n' +
+              r.noEmail + ' without email');
+            document.getElementById('status').focus();
+          })
+          .withFailureHandler(function(err) { fail(err && err.message); })
+          .runUploadImport(base64, file.name);
+      } catch (_) { fail('Couldn’t connect. Close this window and reopen Import from the 80G Admin menu.'); }
     };
-    reader.onerror = function() {
-      showStatus('err', 'Could not read the file.');
-      document.getElementById('goBtn').disabled = false;
-    };
-    reader.readAsDataURL(file);
+    reader.onerror = reader.onabort = function() { fail('Couldn’t read the file. Please select it again.'); };
+    try { reader.readAsDataURL(file); } catch (_) { fail('Couldn’t read the file. Please select it again.'); }
   }
-
-  function showStatus(type, msg) {
-    var s = document.getElementById('status');
-    s.className = 'status ' + type;
-    s.textContent = msg;
+  function showStatus(type, message) {
+    var status = document.getElementById('status');
+    status.className = 'status ' + type;
+    status.setAttribute('role', type === 'err' ? 'alert' : 'status');
+    status.textContent = message;
+    status.hidden = false;
   }
+  input.addEventListener('change', function() {
+    var file = input.files && input.files[0];
+    document.getElementById('fileSummary').textContent = file ? file.name + ' · ' +
+      (file.size < 1048576 ? Math.ceil(file.size / 1024) + ' KB' : (file.size / 1048576).toFixed(1) + ' MB') : '';
+    document.getElementById('status').hidden = true;
+  });
+  form.addEventListener('submit', runImport);
 </script>
 </body>
 </html>
