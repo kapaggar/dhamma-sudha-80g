@@ -1,135 +1,160 @@
 # Dhamma Sudha 80G
 
-Automated workflow to collect donor PAN details and push them back to the dana portal, enabling the generation of 80G donation certificates under the Indian Income Tax Act.
+Google Apps Script and Google Sheets automation for Dhamma Sudha Vipassana Centre.
+It collects donor PAN details, updates the centre's dana portal, and prepares an
+80G export. The dana portal generates and delivers certificates; this repository
+does not generate PDFs or determine a donor's tax eligibility.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the detailed architecture reference.
+Production runs in a spreadsheet-bound Apps Script project. A small admin team
+works through the **80G Admin** spreadsheet menu; donors use personal signed links.
+There is no production Node server or separate hosting service.
 
----
+- [Local development](#local-development) and [Google setup](#google-setup)
+- [Data model](#data-model), [configuration](#configuration), and [deployment](#deployment)
+- [Architecture](docs/ARCHITECTURE.md), [decisions](docs/DECISIONS.md), and [review evidence](docs/REVIEW.md)
+- [Contributing](CONTRIBUTING.md), [security reporting](SECURITY.md), and [agent guidance](AGENTS.md)
 
-## What This Project Does
+## Workflow
 
-**The problem:** Dhamma Sudha Vipassana Centre receives donations through their dana portal (Drupal 7, `sudha.dana.vridhamma.org`). Around 80-90% of donors submit Aadhaar, Passport, or no ID instead of a PAN card. Without PAN, the centre cannot issue 80G tax-exemption certificates to donors.
+1. **Import:** fetch a dana report or upload an XLS/XLSX file. Deduplicate by receipt
+   number, validate PAN, and reuse a valid PAN for repeat donors with the same email.
+2. **Contact:** group pending receipts by donor email and send one signed form link.
+   Optional WhatsApp campaigns send a direct link or a separate email nudge.
+3. **Collect:** display donor details and receipts, require explicit consent, and
+   save a validated PAN for all pending receipts associated with that email.
+4. **Write back:** preview eligible records, then update dana while preserving
+   unrelated live edit-form fields and recording the result.
+5. **Review/export:** refresh the masked admin review or generate `ready_for_80g`
+   with validated, full PAN values for the centre's certificate workflow.
 
-**Who it is for:** The centre's administrative team (1-3 people). Not a public-facing app in the traditional sense - the only public surface is the PAN submission form, which is locked to specific donors via signed links.
+Row status follows validated PAN availability before email availability:
 
-**What it does:**
-1. **Imports** donation records automatically from the dana portal (scheduled or manual)
-2. **Identifies** donors who need PAN - those without `id_type = PAN` in the dana export
-3. **Emails** each donor a personalized, signed link to a secure PAN submission form
-4. **Collects** PAN via a web form (Google Apps Script Web App), validating format on both client and server
-5. **Pushes** the collected PAN back to the dana portal by programmatically editing each donation slip
-6. **Exports** a clean dataset ready for 80G certificate generation
+| Status | Meaning |
+|---|---|
+| `have_pan` | A valid-format PAN is available, including when email is absent |
+| `need_pan` | PAN is missing or invalid and an email is available for collection |
+| `no_email` | PAN is missing or invalid and there is no email for collection |
 
-**What it does NOT do:** Generate the actual 80G PDF certificates. The dana portal handles certificate generation and delivery (PDF + WhatsApp/email) once the PAN is in the system.
+PAN validation checks format, not ownership or government records. Historical
+rows are not automatically cleaned up by a code deployment.
 
----
+## Repository map
 
-## Current Status
+| File | Responsibility |
+|---|---|
+| `Code.gs` | Web entry point, submission, sheet initialization and schema migration |
+| `Utils.gs` | Admin authorization, HMAC tokens, PAN validation/masking, audit helpers |
+| `DanaImport.gs` | Portal login/report fetch, REST XLS conversion, receipt mapping, import locking |
+| `WriteBack.gs` | Candidate selection, live-form preflight, write-back and diagnostics |
+| `Email.gs` | Initial email, reminders, per-run limits and email triggers |
+| `Whatsapp.gs` | 360dialog link/nudge campaigns, limits and separate campaign logs |
+| `Admin.gs` | Spreadsheet menu, admin review and 80G export |
+| `DonationDay.gs` | Temporary import/email/nudge schedule with automatic expiry |
+| `Form.html` / `Message.html` | Donor form and status/error screens |
+| `ImportDialog.html` / `UploadDialog.html` | Admin date-range and file-import dialogs |
+| `UiStyles.html` | Shared local, responsive styles |
+| `Tests.gs` / `tests/*.cjs` | Editor tests, offline regressions and synthetic preview |
+| `appsscript.json` | Apps Script runtime, scopes, web-app settings and fetch whitelist |
+| `AGENTS.md` / `CLAUDE.md` | Shared agent guidance and Claude entry point |
 
-**Prototype / partially production-ready.**
+## Local development
 
-- Core flows (import, email, form submission) are working.
-- Write-back to dana portal (`WriteBack.gs`) is implemented but should be dry-run tested on real data before enabling the hourly trigger.
-- Offline regression tests cover import processing, write-back preflight, access boundaries, and UI behavior. Live Google/Drupal integration still requires deployment validation.
-- The dana portal runs behind Cloudflare, which may block Apps Script requests intermittently. A manual XLS upload fallback exists.
-- 80G certificate generation is out of scope - the dana portal handles that.
+The offline suite and preview require Node.js 18+ and no npm dependencies. Use a
+supported Node.js LTS release; current [clasp requires Node.js 22+](https://github.com/google/clasp#nodejs-version)
+when working with Google deployments.
 
-**Known gaps:**
-- `DANA_PASS` is base64-encoded in Script Properties for screen-share hygiene only; this is not encryption.
-- `receipt_no → donation_id` mapping for old records (imported before `WriteBack.gs` was added) requires a re-fetch during write-back.
-- No retry logic if a single write-back POST fails (circuit breaker stops after 3 consecutive errors).
-- Monthly auto-import trigger must be manually installed via `80G Admin → Enable Hourly Auto-Push`.
-
----
-
-## Architecture Overview
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full diagram and component breakdown.
-
-**High-level:**
-
-```
-dana portal (Drupal 7)
-  ├── import: POST /donation-report → XLS → Drive API convert → parse
-  └── write-back: GET+POST /donation/edit/{id}
-
-Google Apps Script
-  ├── DanaImport.gs    — fetch, parse, dedup, import to Sheets
-  ├── Email.gs         — send HTML emails via MailApp
-  ├── Code.gs          — web app (doGet + submitForm)
-  ├── WriteBack.gs     — push PAN back to dana
-  ├── Admin.gs         — Sheets menu + admin review + export
-  └── Utils.gs         — tokens, PAN validation, audit log
-
-Google Sheets (6 active sheets)
-  ├── donors_input     — one row per dana transaction (26 cols)
-  ├── submissions      — one row per PAN form submission
-  ├── email_log        — tracking initial emails and reminders
-  ├── audit_log        — every action logged
-  ├── import_log       — every dana import run
-  └── ready_for_80g    — export view: have_pan rows with full PAN
-
-Web App (Apps Script, anonymous access)
-  └── Form.html + ImportDialog.html
-
-External services
-  ├── dana portal       — source of truth for donations
-  └── Google Drive API  — XLS → Google Sheet conversion
+```bash
+git clone https://github.com/kapaggar/dhamma-sudha-80g.git
+cd dhamma-sudha-80g
+node --test tests/*.test.cjs
+node tests/preview.cjs
 ```
 
----
+Open [the local preview](http://127.0.0.1:8787/). It uses synthetic fixtures and a
+mock browser/server bridge; it cannot access Sheets or send messages.
 
-## Repository Structure
+| Preview route | State |
+|---|---|
+| `/` | Donor PAN form |
+| `/?state=received` | Already-received screen |
+| `/?state=empty` | No pending receipts |
+| `/?outcome=failure` / `/?outcome=empty` | Submission error recovery |
+| `/import` / `/upload` | Admin import dialogs |
+| `/invalid` | Invalid-link screen |
 
-```
-dhamma-sudha-80g/
-├── Code.gs            Web app entry point (doGet), form submit handler (submitForm),
-│                      sheet init (initSheets), schema migration (migrateSchema)
-├── Utils.gs           Shared utilities: HMAC token gen/validate, PAN validate/normalize,
-│                      PAN masking, audit log append, getOrCreateSheet
-├── DanaImport.gs      All dana portal interaction: login (Drupal 7 + Cloudflare),
-│                      report fetch (POST form + XLS), XLS parsing via Drive API,
-│                      receipt→donation_id mapping, dedup, insert to donors_input
-├── WriteBack.gs       Push collected PAN back to dana: find candidates, GET+POST
-│                      /donation/edit/{id}, HTML form extraction, hourly trigger mgmt
-├── Email.gs           Send/remind donors: HTML+plaintext emails via MailApp,
-│                      group by email, reminder schedule (3d/7d, max 2)
-├── Admin.gs           Spreadsheet menu (onOpen), admin_review refresh (color-coded),
-│                      exportReadyFor80G
-├── Tests.gs           Unit tests for PAN validation, token logic (run via menu)
-├── Form.html          Donor-facing PAN submission form (Apps Script Web App template)
-├── ImportDialog.html  Admin modal for date-range dana import (shown via showModalDialog)
-├── appsscript.json    Project manifest: scopes, urlFetchWhitelist, V8 runtime
-├── .graphifyignore    Files excluded from the graphify knowledge graph
-└── docs/
-    ├── ARCHITECTURE.md  Full architecture reference
-    └── GRAPHIFY.md      Code knowledge graph: setup, usage, token economics
+The offline suite covers authorization boundaries, token/PAN logic, import and
+write-back safeguards, and browser handlers. `runAllTests` also runs a smaller
+suite in the bound Apps Script editor or **80G Admin → Run Tests**. Neither replaces
+live integration validation. See [docs/REVIEW.md](docs/REVIEW.md) for evidence and
+remaining checks; do not test releases by messaging real donors.
 
-(untracked: graphify-out/ — generated knowledge graph output, gitignored)
-```
+## Google setup
 
----
+Use a separate development spreadsheet and bound Apps Script project with synthetic
+data. A fresh clone may contain a `.clasp.json` project link: inspect and replace
+it with your own project before any push.
 
-## Core Domain Concepts
+1. Install [clasp](https://github.com/google/clasp) and run `clasp login`. Enable
+   the Apps Script API in [user settings](https://script.google.com/home/usersettings).
+2. In the target spreadsheet, open **Extensions → Apps Script**. Copy the script ID
+   and set the local `.clasp.json` to `{"scriptId":"YOUR_SCRIPT_ID","rootDir":"."}`.
+   The project must remain bound to this spreadsheet; a standalone project does
+   not satisfy the admin authorization guard.
+3. Run `clasp push` to upload the source. Review the manifest before accepting any
+   overwrite prompt. Keep credentials outside git.
+4. In **Project Settings → Script Properties**, set the required configuration
+   below. For a new installation, generate a new `TOKEN_SECRET` with
+   `openssl rand -hex 32` and paste the output privately. Preserve the existing
+   secret when updating an installation.
+5. Reload the spreadsheet and use **80G Admin → Initialize All Sheets** for a new
+   installation. For an older schema missing Y/Z, use **Migrate Schema**. Never
+   reorder existing columns.
+6. Create a web-app deployment with **Execute as: Me** and **Who has access: Anyone**.
+   Save its `/exec` URL as `WEB_APP_URL`. Future releases update this deployment.
+7. Verify the developer/admin and anonymous donor contexts before enabling any
+   sending or write-back schedules.
 
-**Donor** - A person who made a donation to the centre. Identified by email address in our system (one email = one form link, even if they have multiple donations).
+There is no Drive advanced service to enable. XLS conversion uses the Drive REST
+API with the narrow `drive.file` scope; do not add `DriveApp` or `Drive.Files.*`.
 
-**Receipt** - A single donation transaction in the dana portal. Has a unique `receipt_no` (format: `ER0010722`). Also has an internal `donation_id` (numeric, e.g. `10532`) used in the dana edit URL `/donation/edit/{donation_id}`.
+## Configuration
 
-**PAN** - Permanent Account Number. 10-character Indian tax identifier (`[A-Z]{5}[0-9]{4}[A-Z]`). Required for 80G certificates. Some donors provide Aadhaar/Passport/Voter ID instead.
+All runtime configuration lives in Apps Script **Script Properties**. Project
+editors can access those values through script code, so limit spreadsheet/script
+edit access to trusted admins. No configuration values belong in git, screenshots,
+issues, or logs. The tables list property names and source-code defaults only.
 
-**80G Certificate** - Income Tax Act certificate allowing donors to claim tax deduction on charitable donations. Requires donor PAN. Issued by the dana portal (PDF + WhatsApp/email) - not by this system.
+| Property | Requirement / purpose |
+|---|---|
+| `SHEET_ID` | Required: ID of the bound spreadsheet |
+| `TOKEN_SECRET` | Required secret: HMAC signing key; changing it breaks existing donor links |
+| `CENTER_NAME` | Optional display name; defaults to Dhamma Sudha Vipassana Centre |
+| `WEB_APP_URL` | Required for sending links; existing versioned deployment's `/exec` URL |
+| `DANA_URL` | Required for portal operations; host must be in `urlFetchWhitelist` |
+| `DANA_USER` / `DANA_PASS` | Required for portal operations; username and base64-encoded password |
+| `ADMIN_EMAIL` | Optional recipient for trigger-failure alerts; otherwise inspect execution logs |
+| `EMAIL_MAX_PER_RUN` | Positive integer; default 10, with daily-quota checks |
 
-**pan_status** - The lifecycle status of a donors_input row:
-- `need_pan` - donor did not provide PAN; email should be sent
-- `have_pan` - PAN is collected (either from dana or from our form)
-- `no_email` - no email address; cannot be contacted
+`DANA_PASS` base64 encoding is only for screen-share hygiene, not encryption. Encode
+the password without a trailing newline using a private local workflow; do not put
+password literals into shell history or commit them as examples.
 
-**dana_updated_at** - Timestamp set after PAN is successfully pushed back to dana portal. Prevents double-writes.
+Optional WhatsApp configuration:
 
-**Signed token** - HMAC-SHA256 of donor email, used in form URLs. One token per email address, deterministic, never expires. Format: `base64url(email).hex(hmac)`.
+| Property | Purpose / source-code default |
+|---|---|
+| `WA360_URL` / `WA360_API_KEY` | Provider endpoint and secret API key; required for WhatsApp sends |
+| `WA_API_VERSION` | `v2` by default; `v1` is also supported by the payload builder |
+| `WA360_NAMESPACE` | Namespace for v1 templates, when required |
+| `WA_TEMPLATE_NAME` / `WA_TEMPLATE_LANG` | Approved direct-link template; language defaults to `en` |
+| `WA_NUDGE_TEMPLATE_NAME` / `WA_NUDGE_LANG` | Nudge template defaults to `status_update_2`; language `en` |
+| `WA_NUDGE_SUBJECT` / `WA_NUDGE_STATUS` | Nudge text; defaults describe the 80G request and PAN pending |
+| `WA_MAX_PER_RUN` | Positive integer; default 50 |
+| `WA_MIN_AMOUNT` | High-value direct-link campaign threshold; default 10000 |
 
----
+Confirm templates are approved for the configured WhatsApp account before sending.
+`DONATION_DAY_UNTIL` and `DONATION_DAY_ERR_MAILED_AT` are maintained by Donation Day mode;
+use its menu actions instead of manually changing those values.
 
 ## Data Model
 
@@ -139,7 +164,7 @@ One row per dana transaction. Primary key: `receipt_no`.
 
 | Col | Field | Notes |
 |-----|-------|-------|
-| A | receipt_no | PK. Format: `ER0010722` |
+| A | receipt_no | Primary key; dana receipt number |
 | B | txn_date | Date money received (YYYY-MM-DD) |
 | C | created_on | Date donation slip created in dana |
 | D | full_name | Donor name from dana |
@@ -157,8 +182,8 @@ One row per dana transaction. Primary key: `receipt_no`.
 | P | merchant_ref | UPI/Razorpay transaction reference |
 | Q | id_type | As-is from dana: "PAN", "Aadhaar", "Passport", "" |
 | R | id_value | The ID value from dana; PAN is masked on new imports |
-| S | pan_collected | Normalized PAN (from form submission or copied from id_value if id_type=PAN) |
-| T | pan_name | Donor name as used on PAN (from existing full_name; donors no longer re-enter) |
+| S | pan_collected | Validated PAN from submission, source PAN, or repeat-donor auto-fill |
+| T | pan_name | Stored PAN-record name; submission uses existing full_name |
 | U | pan_status | `need_pan` / `have_pan` / `no_email` |
 | V | comment | From dana |
 | W | imported_at | ISO timestamp of dana import |
@@ -200,7 +225,7 @@ One row per donor email address (not per receipt). Tracks whether an email was s
 
 ### `audit_log` (8 columns)
 
-Append-only log of every action. Never deleted. Actor values: `form_submit`, `danaImport`, `sendPendingEmails`, `sendReminders`, `writeBack`, `system`.
+Operational audit trail. PAN is masked, but receipt/email references still make this sheet sensitive. Actor examples: `form_submit`, `danaImport`, `sendPendingEmails`, `sendReminders`, `writeBack`, `system`.
 
 | Field | Notes |
 |-------|-------|
@@ -219,495 +244,183 @@ One row per dana import run (manual or auto).
 
 ### `ready_for_80g`
 
-View-only export sheet. Regenerated on demand via `80G Admin → Export Ready for 80G`. Contains only `have_pan` rows with full (unmasked) PAN. This is the final dataset for certificate generation.
+Generated export sheet. Regenerated on demand via `80G Admin → Export Ready for 80G`. Includes only `have_pan` rows whose PAN passes format validation, with full (unmasked) PAN. Restrict access to the sheet and downloaded exports.
 
----
 
-## Main User Flows
+### `wa_log` and `wa_nudge_log` (9 columns each)
 
-### 1. Import from Dana Portal
+Separate logs for direct PAN-link campaigns and email-nudge campaigns. Both store
+`phone`, `email`, `receipt_nos_in_wa`, `sent_at`, `wa_status`, `wa_message_id`,
+`reminder_count`, `submitted_at`, and `last_reminder_at`. A nudge must not suppress
+an eligible direct-link message by sharing its campaign log.
 
-```
-Admin: 80G Admin → 1. Import from Dana → Auto Import
-  → ImportDialog opens with pre-filled dates (last import end → today)
-  → Admin confirms date range → runImportFromDialog(start, end)
-  → Login to dana (Drupal 7: GET login page → extract form_build_id → POST creds → get SSESS cookie)
-  → GET /donation-report → extract form_build_id + form_token
-  → POST /donation-report with date range + op=Get Report
-  → Parse HTML response → build receipt_no → donation_id map
-  → GET /donation-report/excel?... → XLS binary
-  → Upload XLS to Drive → convert to Google Sheet (Drive REST API, drive.file scope)
-  → Read converted sheet → map columns → process rows:
-      id_type=PAN → pan_status='have_pan'
-      email exists in emailToPan → pan_status='have_pan' (auto-filled repeat donor)
-      email present, no PAN → pan_status='need_pan'
-      no email → pan_status='no_email'
-  → Dedup by receipt_no (skip existing)
-  → Append new rows to donors_input (26 cols)
-  → Delete temp Google Sheet
-  → Append to import_log
+### `admin_review`
+
+Regenerated, color-coded review of ready, pending, overdue, and no-email records.
+PAN is masked here. Refresh it through **80G Admin → Refresh Admin Review**.
+
+
+## Operational safeguards
+
+### Donor links and admin access
+
+`generateToken_` signs the lowercased, trimmed email with HMAC-SHA256:
+
+```text
+base64url(email) + "." + hex(HMAC-SHA256(email, TOKEN_SECRET))
 ```
 
-**Fallback (Cloudflare blocks):** Admin downloads XLS manually from dana portal, then uploads it from their computer via `80G Admin → Import XLS from Computer` (file picker dialog; max 10 MB). Donation_id mapping will be empty (looked up lazily during write-back).
+Tokens are deterministic and do not expire. `doGet` and `submitForm` validate them
+on the server. Treat a signed link as sensitive access to that donor's form. Keep
+`<?!= JSON.stringify(token) ?>` in the template, and never log supplied or expected
+tokens. `submissions.source_link_token` currently retains the submitted token, so
+submission-sheet access also requires protection.
 
-### 2. Email Donors
+Sensitive helpers (`generateToken_`, `readProp_`, `getSpreadsheet_`) use the
+[private trailing-underscore convention](https://developers.google.com/apps-script/guides/html/communication#private_functions).
+Every public admin action checks `requireAdminContext_` before side effects. The
+active spreadsheet must match `SHEET_ID`, plus either spreadsheet UI access or a
+native installed clock event must be present. An anonymous browser callback can
+retain the bound container, so container lookup alone is not authorization.
+Preserve native enum comparison and event forwarding in trigger handlers.
 
-```
-Admin: 80G Admin → 2. Email Donors → Send PAN Request Emails
-  → Find all donors_input rows where pan_status='need_pan'
-  → Group by email (one email per donor, even if multiple receipts)
-  → Skip emails already in email_log
-  → For each donor:
-      generateToken(email) → HMAC-SHA256 signed link
-      MailApp.sendEmail HTML email with "Submit Your PAN Details" button
-      Append to email_log
-```
+### Import and submission
 
-**Reminders:** `sendReminders()` runs on a time-based trigger or manually. Sends up to 2 reminders (day 3, day 10 after initial). Stops if `submitted_at` is set in email_log.
+- Server checks enforce real ordered dates, XLS/XLSX extensions, non-empty uploads,
+  and a 10 MB limit. Uploaded content is converted through the Drive REST API and
+  the temporary sheet is deleted after processing.
+- The shared receipt read/dedup/append phase is locked and flushed together;
+  portal fetch and conversion run outside the lock. Re-import skips known receipts.
+- Valid PANs from existing rows or anywhere in the same report can fill repeat
+  donors; malformed values are never propagated as valid PAN.
+- A form submission requires boolean consent, preflights its storage, and locks
+  updates across all matching pending receipts. Repeated submissions do not create
+  another successful submission when no pending rows remain.
 
-### 3. Donor Submits PAN (Web Form)
+### Messaging and reminders
 
-```
-Donor clicks link: /exec?email=...&token=...
-  → doGet validates HMAC token
-  → Looks up all need_pan rows for this email in donors_input
-  → Renders Form.html with: name (read-only), email (read-only), receipt list (read-only), PAN input
-  → Donor enters PAN, checks consent, clicks Submit
-  → submitForm() server-side:
-      Re-validate token
-      Validate + normalize PAN ([A-Z]{5}[0-9]{4}[A-Z])
-      Update ALL need_pan rows for this email:
-        pan_collected = PAN
-        pan_name = existing full_name (uppercased)
-        pan_status = 'have_pan'
-        pan_submitted_at = now
-      Append to submissions
-      Update email_log submitted_at
-```
+Initial email groups pending receipts by email, respects the configured per-run
+cap and remaining MailApp quota, and retries failed initial sends. It does not
+skip an address merely because a failed row exists in `email_log`.
 
-### 4. Push PAN to Dana Portal
+At most two reminders are sent: the first after at least 3 days from the successful
+initial email, and the second after at least 7 days from the first reminder. Actual
+send times depend on the schedule and quota. Reminders stop when PAN is no longer
+needed or a submission is recorded. Direct WhatsApp links and email nudges have
+separate logs and provider limits.
 
-```
-Admin: 80G Admin → 3. Push PAN to Dana → Preview (dry run)
-  → findWriteBackCandidates_(): donors_input where pan_status='have_pan'
-      AND id_type != 'PAN' AND dana_updated_at is empty
-  → For rows missing donation_id: fetch /donation-report HTML, parse edit links
-  → [Dry run] log what would change, no writes
+### Dana write-back
 
-Admin: 80G Admin → 3. Push PAN to Dana → Push Now
-  → Same candidate selection
-  → For each (max 50 per run, circuit breaker at 3 consecutive errors):
-      GET /donation/edit/{donation_id} → extract all current form values
-      Override d_id_type=1 (PAN), d_id_no=pan_collected, email=0, whatsapp=0
-      POST /donation/edit/{donation_id} → expect 302 redirect
-      Update donors_input: dana_donation_id, dana_updated_at
-      Append to audit_log
-      Sleep 800ms
-```
+Run **80G Admin → 3. Push PAN to Dana → Preview (dry run)** before a real push.
+Preview does not edit dana or sheet records. It may log in and fetch a report to
+resolve missing donation IDs; it does not validate each live edit form.
 
-**Hourly auto-push:** `80G Admin → Enable Hourly Auto-Push` installs a time-based trigger calling `autoWriteBackHourly()`. Emails the admin if it fails.
+Candidates have `have_pan`, a collected PAN, and no `dana_updated_at`. Records
+already imported with valid source PAN are excluded; invalid source PAN can be
+repaired. Receipt mapping stays within one HTML table row; ambiguous/conflicting
+mappings are omitted.
 
-### 5. Admin Review
+A real push locks candidate selection and updates, validates PAN, reads the live
+edit form, and preserves unrelated fields. It sets `d_id_type=1`, `d_id_no=pan`,
+and `email=0` / `whatsapp=0`. These notification-suppression field names remain an
+assumption to verify before large batches. Required selects accept real defaults
+such as `Non Course` with value `0`, but reject placeholder labels and empty values.
 
-```
-Admin: 80G Admin → Refresh Admin Review
-  → Reads all donors_input rows
-  → Categorizes each:
-      ready_for_80g      (have_pan) — green
-      pending_need_pan   (need_pan, < 10 days) — yellow
-      overdue_need_pan   (need_pan, > 10 days) — orange
-      no_email_cannot_contact — red
-  → Writes color-coded admin_review sheet
-```
+Valid live PAN produces `ALREADY_PAN`; missing required fields produce `SKIP:`.
+These outcomes do not count as consecutive errors. The batch limit is 50 and the
+circuit breaker stops after 3 consecutive real failures. A transient 5xx edit
+response gets one fresh GET/POST retry; a 4xx or HTTP 200 validation rejection does
+not. Successful edits expect HTTP 302 and record `dana_updated_at` plus an audit entry.
 
-### 6. Export for Certificate Generation
-
-```
-Admin: 80G Admin → Export Ready for 80G
-  → Filters donors_input: pan_status='have_pan'
-  → Writes ready_for_80g sheet with full (unmasked) PAN
-  → Admin downloads ready_for_80g as CSV/XLSX and hands off to dana operator
-    (dana portal generates the 80G PDFs and sends via WhatsApp/email)
-```
-
----
-
-## Setup and Local Development
-
-### Prerequisites
-
-- macOS or Linux (Windows untested)
-- Node.js ≥ 18 (install via `nvm install --lts`)
-- `@google/clasp` ≥ 3.x (`npm install -g @google/clasp`)
-- A Google account with Apps Script API enabled at https://script.google.com/home/usersettings
-
-### Install
-
-```bash
-git clone https://github.com/kapaggar/dhamma-sudha-80g.git
-cd dhamma-sudha-80g
-clasp login
-```
-
-### Link to an Existing Script Project
-
-If you're taking over an existing deployment:
-
-```bash
-# Get the script ID from the Apps Script URL:
-# https://script.google.com/u/0/home/projects/{SCRIPT_ID}/edit
-echo '{"scriptId":"YOUR_SCRIPT_ID","rootDir":"."}' > .clasp.json
-```
-
-### Create a New Deployment
-
-1. Open the target Google Spreadsheet → **Extensions → Apps Script**
-2. Copy the script ID from the URL
-3. `echo '{"scriptId":"SCRIPT_ID","rootDir":"."}' > .clasp.json`
-
-### Push Code
-
-```bash
-clasp push
-# When asked "Manifest file has been updated. Overwrite?" → y
-```
-
-### Set Script Properties
-
-Apps Script editor → ⚙ Project Settings → Script Properties:
-
-| Property | Value | Notes |
-|----------|-------|-------|
-| `SHEET_ID` | Google Spreadsheet ID | From spreadsheet URL |
-| `TOKEN_SECRET` | `$(openssl rand -hex 32)` | Required. Keep secret. |
-| `CENTER_NAME` | `Dhamma Sudha Vipassana Centre` | Displayed in emails + form |
-| `WEB_APP_URL` | Web app deploy URL | Set after first deploy (see below) |
-| `DANA_URL` | `https://sudha.dana.vridhamma.org` | Dana portal base URL |
-| `DANA_USER` | Dana portal username | Not email - plain username |
-| `DANA_PASS` | `echo -n 'password' \| base64` | Base64-encoded. See note below. |
-| `ADMIN_EMAIL` | Admin's email address | Recipient of trigger-failure alerts. If unset, alerts are skipped. |
-
-**`DANA_PASS` encoding:** The password is base64-encoded for screen-share hygiene (not encryption). Encode it: `echo -n 'YourPassword' | base64`. The `-n` flag is required to prevent a trailing newline from being encoded.
-
-### Initialize Sheets
-
-Reload the spreadsheet → **80G Admin → Initialize All Sheets**
-
-If you already have a `donors_input` sheet from a prior version: **80G Admin → Migrate Schema (add new columns)**
-
-### Deploy the Web App
-
-Apps Script editor → **Deploy → New deployment**:
-- Type: Web app
-- Execute as: Me
-- Who has access: Anyone
-- Description: v1
-
-Copy the Web app URL and set it as the `WEB_APP_URL` Script Property.
-
-### Run Tests
-
-In Apps Script editor: function dropdown → `runAllTests` → Run → View → Execution log
-
-The editor suite covers PAN, token, expiry, and HTML decoding helpers. For the offline
-regression suite (Node.js 18+; no dependencies or live services):
-
-```bash
-node --test tests/*.test.cjs
-```
-
-Preview the donor form and admin dialogs with synthetic data:
-
-```bash
-node tests/preview.cjs
-```
-
-Open `http://127.0.0.1:8787`, `/import`, `/upload`, or `/invalid`. The preview simulates
-saving; it does not access Google or send messages. `?state=received`, `?state=empty`,
-`?outcome=failure`, and `?outcome=empty` exercise other donor states.
-See [docs/REVIEW.md](docs/REVIEW.md) for the fixes and deployment validation.
-
-### Test Dana Login
-
-Function dropdown → `testDanaImportLogin` → Run → View → Logs
-
-Expected output: `=== LOGIN OK === Cookie length: NNN Cookie names: SSESS620a...`
-
-### Refresh the Code Knowledge Graph (graphify)
-
-A semantic knowledge graph of this repo lives in `graphify-out/` (gitignored, rebuildable).
-After code or doc changes, refresh it through the graphify skill pipeline with
-the `.gs` runtime patch in [docs/DECISIONS.md](docs/DECISIONS.md). Do not run the
-bare `graphify update .` command: it drops Apps Script files. AST extraction is
-free; changed documents and HTML use semantic extraction with cached results.
-
-See [docs/GRAPHIFY.md](docs/GRAPHIFY.md) for setup, token economics, and the
-fresh-machine setup prompt. Never delete `graphify-out/cache/` — it's what makes
-updates cost 0 tokens.
-
----
-
-## Configuration and Environment Variables
-
-All configuration lives in Apps Script **Script Properties** (encrypted at rest by Google, accessible only to script owner). Nothing is committed to git.
-
-| Property | Required | Secret | Purpose |
-|----------|----------|--------|---------|
-| `SHEET_ID` | Yes | No | Google Spreadsheet ID |
-| `TOKEN_SECRET` | Yes | **Yes** | HMAC key for signed form links. Changing this invalidates all existing links. |
-| `CENTER_NAME` | No | No | Display name in emails and form header. Defaults to "Dhamma Sudha Vipassana Centre". |
-| `WEB_APP_URL` | Yes | No | The deployed web app URL. Set after first Deploy. |
-| `DANA_URL` | Yes | No | Dana portal base URL (`https://sudha.dana.vridhamma.org`). If changed, also update `urlFetchWhitelist` in `appsscript.json`. |
-| `DANA_USER` | Yes | **Yes** | Dana portal username (not email) |
-| `DANA_PASS` | Yes | **Yes** | Dana portal password, base64-encoded |
-| `ADMIN_EMAIL` | No | No | Recipient of trigger-failure alert emails. If unset, failures are only visible in the execution log. |
-
-**What's safe to commit:** Nothing from Script Properties. The `appsscript.json` and all `.gs`/`.html` files are safe. `.clasp.json` contains only the script ID (not a secret) and is safe to commit.
-
----
+Use `diagnoseDanaWriteBack(donationId)` with its default behavior for GET-only,
+PAN-masked diagnosis. The optional POST probe is a real write and is not part of
+routine read-only diagnosis.
 
 ## Deployment
 
-This is a **Google Apps Script Web App**. There is no server to provision.
+A Git push publishes repository changes; `clasp push` updates Google Apps Script.
+They are separate actions. Before an authorized release:
 
-| Layer | Platform | Cost |
-|-------|----------|------|
-| Code runtime | Google Apps Script (Google's infra) | Free |
-| Data storage | Google Sheets | Free |
-| Email sending | MailApp (Google account's quota) | Free |
-| XLS conversion | Google Drive REST API | Free |
-| Web app hosting | Apps Script deployment | Free |
+1. Run offline checks and review the intended files. Compare Google's saved source
+   with the repository baseline so direct editor changes are not overwritten.
+2. Confirm the target project, then `clasp push`. `.claspignore` includes only root
+   `*.gs`, `*.html`, and `appsscript.json`; docs and local tests are excluded.
+3. Create a version and update each active web-app deployment to it through
+   **Deploy → Manage deployments**. Updating existing deployments preserves URLs;
+   older public deployments retain old code until separately updated or retired.
+4. Verify saved/deployed source, anonymous access rejection for admin actions, and
+   the appropriate spreadsheet/trigger contexts. Use synthetic data for tests.
 
-### Deploy a New Version
+Menu functions and installed triggers use saved source after `clasp push`; public
+web-app URLs use their assigned versions. A security fix shared by these paths
+needs both updates. Documentation-only commits need no Apps Script deployment.
 
-After any code change that should go live for the web app (Form.html, Code.gs):
+Preserve the manifest's scopes and `urlFetchWhitelist`. External calls are limited
+to the configured dana portal, 360dialog, and Google API hosts. Scope changes may
+require reauthorization. Apps Script and provider quotas still apply; consult
+[Google's current quotas](https://developers.google.com/apps-script/guides/services/quotas)
+when planning batches.
 
-1. `clasp push`
-2. Apps Script editor → **Deploy → Manage deployments** → pencil icon → Version: **New version** → Deploy
-3. The URL does not change between versions.
+### Time-based triggers
 
-### Push Code Only (no web app change needed)
+Triggers are installed explicitly and survive routine redeployments. Do not
+recreate them on startup or reset schedules as part of a code-only release.
 
-For Admin.gs, Email.gs, etc.:
-1. `clasp push` — changes take effect immediately (no new deployment needed for non-web-app functions)
+| Job | Handler | Installation |
+|---|---|---|
+| Monthly import | `autoImportMonthly` | Editor Triggers: time-driven, **Month timer**, chosen day/time |
+| Daily reminders | `sendReminders` | Editor Triggers: time-driven, **Day timer**, chosen time |
+| Hourly PAN push | `autoWriteBackHourly` | Menu 3 → Enable Hourly Auto-Push |
+| Hourly initial email | `autoSendEmailsHourly` | Menu 2 → Enable Hourly Email Sending |
+| Hourly WhatsApp links | `autoSendWhatsAppHourly` | Menu 4 → Enable Hourly Link Sending |
+| Hourly email nudges | `autoSendWhatsAppNudgeHourly` | Menu 4 → Enable Hourly Nudge Sending |
+| Donation Day | `donationDayTick` | Menu 5 → Enable (3h, every 10 min) |
 
-### Time-Based Triggers
+The manifest time zone is `Asia/Kolkata`. Donation Day imports, sends pending
+emails, and sends WhatsApp nudges every 10 minutes. It expires at its 3-hour
+deadline and removes its trigger. Enabling it removes hourly email/nudge triggers;
+those are not automatically restored. Re-enable them deliberately if needed.
 
-Installed via the Admin menu (not in code directly):
-- **Monthly auto-import:** Apps Script Triggers → `autoImportMonthly` → Day timer, set preferred time
-- **Daily reminders:** Apps Script Triggers → `sendReminders` → Day timer, 9-10am IST
-- **Hourly PAN push:** `80G Admin → 3. Push PAN to Dana → Enable Hourly Auto-Push`
-- **Donation Day mode:** `80G Admin → 5. Donation Day → Enable (3h, every 10 min)` — for donation-day events. Every 10 minutes it imports new donations from dana, sends pending PAN-request emails, and sends WhatsApp email-nudges. It turns itself off after 3 hours (or use "Disable Now"). Enabling removes the hourly email/nudge triggers to avoid double-sends; re-enable them from menus 2 and 4 afterwards if a backlog remains. "Status" shows whether the mode is on and when it expires.
+## Known limitations
 
-Triggers must be installed once after any new deployment. They survive re-deployments.
-
----
-
-## Important Implementation Details
-
-### Token Scheme
-
-Tokens are HMAC-SHA256 signed. One token per email address, regardless of donation count.
-
-```
-token = base64url(email) + "." + hex(HMAC-SHA256(email, TOKEN_SECRET))
-```
-
-- The same email always produces the same token (deterministic). Tokens do not expire.
-- Changing `TOKEN_SECRET` invalidates all outstanding links.
-- `<?!= JSON.stringify(token) ?>` (force-print, no escaping) is used in Form.html to prevent Apps Script's contextual escaping from corrupting the token's `=` character in `<script>` tags.
-
-### PAN Validation
-
-Format: `[A-Z]{5}[0-9]{4}[A-Z]` - exactly 10 characters.
-
-Normalization pipeline: `trim → uppercase → remove internal spaces`. Applied client-side (accessible inline feedback) and server-side before submission, import classification, export, and write-back.
-
-PAN is stored full in `pan_collected` and `submissions.pan`. It is **masked** (`ABCDE****F`) in `admin_review` and in log messages. Full PAN is only shown in `ready_for_80g` export.
-
-### Dana Portal Integration (Drupal 7)
-
-The dana portal is a Drupal 7 site behind Cloudflare. Three-step login:
-
-1. GET `/user/login` → extract `form_build_id` (CSRF token embedded in HTML)
-2. POST `/user/login?destination=donation&autologout_timeout=1` with credentials + `form_build_id` → get `SSESS{hash}` session cookie in response
-3. All subsequent requests include `Cookie: SSESS{hash}=...`
-
-**Cloudflare:** A `Mozilla/5.0 Chrome/125` `User-Agent` header is sent on every request. Without it, Cloudflare returns HTTP 403/503.
-
-**Report fetch** requires a 3-step flow:
-1. GET `/donation-report` → extract `form_build_id` + `form_token`
-2. POST `/donation-report` with date range and `op=Get Report` → HTML response containing both the report table and the `Download as Excel` link
-3. GET `/donation-report/excel?start=...&end=...&id_type=all&txn_type&don_tags&...` → XLS binary
-
-The exact query string for step 3 was determined by HAR analysis. It differs from the simpler `?start&end&category&txn_type=all` seen in URLs elsewhere - notably `id_type=all` (not `txn_type=all`), and several valueless params (`txn_type`, `don_tags`, `synced`, etc).
-
-**XLS parsing:** `UrlFetchApp` returns a blob. The blob is uploaded to Google Drive with `mimeType: GOOGLE_SHEETS` which triggers automatic conversion. The resulting Google Sheet is read via `SpreadsheetApp.openById()`, then the temp file is permanently deleted.
-
-### Receipt → Donation ID Mapping
-
-The dana XLS export does not include the donation_id (the internal numeric ID used in `/donation/edit/{id}`). The mapping is extracted from the HTML of the `/donation-report` POST response by:
-1. Finding table rows containing one distinct `/donation/edit/(\d+)` ID and one distinct `ER-?\d+` receipt
-2. Mapping within that row only, regardless of link order; omitting ambiguous or conflicting mappings
-
-This is stored in `donors_input.dana_donation_id` (column Y). For rows imported before this column was added, `WriteBack.gs` re-fetches the report HTML during write-back.
-
-### Write-back Safety
-
-`d_id_type=1` (PAN in dana's select options), `d_id_no={pan}`.
-
-`email=0` and `whatsapp=0` are set explicitly to prevent dana from sending the donor a duplicate donation receipt/confirmation when we edit the slip.
-
-All other form fields (donor name, address, course, amount, payment mode, etc.) are extracted from the GET response of the edit page and re-submitted unchanged. This is the safest approach - we don't need to maintain a separate copy of fields we're not changing.
-
-### Repeat Donor Auto-Fill
-
-During import, if a donor's email already has a `pan_collected` value in an existing row, new donations from the same email are automatically marked `have_pan` with the same validated PAN. Valid PANs elsewhere in the same import are also considered, regardless of row order. This means the donor does not need to re-submit PAN for each course.
-
-### Multi-Receipt Single Email
-
-A donor with 3 pending receipts receives one email showing all 3 in a table. One PAN submission updates all 3 rows. This is enforced by grouping `byEmail` in `sendPendingEmails()` and updating all `need_pan` rows for the email in `submitForm()`.
-
----
-
-## AI Memory / Project Context
-
-### Original Goal
-
-Build an automated system for Dhamma Sudha Vipassana Centre to:
-1. Collect PAN from donors who donated with Aadhaar/Passport/other ID
-2. Push the PAN back to their dana portal so 80G certificates can be issued
-3. Run with minimal manual intervention
-
-### Platform Choice
-
-The entire system runs on Google Apps Script + Google Sheets. No servers, no hosting cost, no DevOps. The centre has a 3-4 person team with no dedicated technical staff. Maintainability and zero infrastructure overhead were the primary constraints.
-
-### Key Design Decisions
-
-**Token scheme:** HMAC(email) only - one link per donor regardless of donation count. Simpler than per-receipt tokens. Deterministic (re-sendable without invalidating the link).
-
-**One form submission = all pending receipts:** Rather than one link per receipt, a single form visit collects PAN and updates all pending donations for that email. Reduces donor friction significantly.
-
-**Name not re-collected on form:** We have the donor's name from the dana import. Re-asking them to type "Name as per PAN" was rejected as unnecessary friction.
-
-**MailApp not GmailApp:** `GmailApp` requires a broader OAuth scope (`mail.google.com`) which caused permission errors in Apps Script context. `MailApp` (scope: `script.send_mail`) is sufficient for send-only use and was used instead.
-
-**DANA_PASS base64-encoding:** Not cryptographic security - explicitly for screen-share hygiene during code review. `readProp_()` decodes it silently. Function is named generically to avoid broadcasting intent in a shared screen.
-
-**XLS via Drive API:** Apps Script cannot natively parse binary XLS. Uploading to Drive and converting to Google Sheets is the most reliable method. A temp file is created and immediately deleted. This goes through the Drive REST API with `UrlFetchApp` (not the Drive advanced service or `DriveApp`, which both demand the full `drive` scope instead of `drive.file`).
-
-**No course codes:** The dana portal uses course type names ("10 Day Course", "Non Course"), not structured codes. The `course` field is stored as-is and not used for filtering.
-
-### Things That Changed During Development
-
-- Started with a Google Form + native Sheets approach; switched to an Apps Script Web App because Google Forms can't validate signed tokens or support dynamic multi-row input.
-- Token scheme changed from `HMAC(course_id + email)` to `HMAC(email)` when we discovered the dana data has no course codes.
-- `name_as_per_pan` field removed from form after user confirmed it's unnecessary - existing name on file is sufficient.
-- Dana report fetch was initially assumed to be a simple GET with URL params; HAR analysis revealed it requires a POST first (`op=Get Report`) before the XLS download URL becomes valid.
-- `User-Agent` header was missing initially, causing Cloudflare to block logins. Adding a Chrome UA string fixed it.
-- `setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DENY)` removed - the constant is not valid in newer Apps Script runtimes.
-- `<?= JSON.stringify(token) ?>` → `<?!= JSON.stringify(token) ?>` in Form.html to prevent contextual HTML escaping from corrupting the token string in `<script>` tags.
-
-### Unfinished TODOs
-
-- [ ] Monthly auto-import trigger must be manually installed (no code to install it via menu, unlike the hourly write-back trigger)
-- [ ] `importXlsFromComputer` does not capture `donation_id` during import (no HAR parsing in the fallback path) - needs re-fetch during write-back
-- [ ] No deduplication logic if the same donor submits PAN twice (second submission will find 0 `need_pan` rows and return an error, which is correct but the UX could be friendlier)
-- [ ] `admin_review` sheet shows masked PAN; full PAN is only in `ready_for_80g`. If admin needs to verify a submitted PAN without exporting, there's no shortcut.
-- [ ] No test for the write-back flow end-to-end (requires live dana credentials)
-
-### Known Bugs / Fragile Areas
-
-- **Receipt-to-donation_id parsing** (`parseReceiptToDonationIdMap_`) requires an unambiguous receipt and edit ID within the same HTML table row. Changed portal markup can leave mappings missing; such records are skipped for write-back rather than guessing across rows.
-- **Cloudflare** can block the dana login at any time. There is no automated retry or fallback; the admin must use the manual XLS upload if this happens.
-- **Apps Script 6-minute execution limit:** Large imports (hundreds of rows) with the Drive API conversion step could approach the limit. Not observed in practice but worth monitoring.
-- **email and whatsapp = 0 in write-back:** Assumed this prevents dana from sending duplicate notifications. Not confirmed by testing with dana admins - verify before enabling hourly auto-push on a large batch.
-
-### Warnings for Future AI Agents
-
-1. **Do not change the token scheme** without invalidating all outstanding links (donors will get broken links in their inboxes).
-2. **Do not add `import_log` or `admin_review` to `initSheets` as persistent sheets** - they are regenerated on demand or written-to on import. `admin_review` is a read-only view.
-3. **The XLS column positions are fragile.** The dana export column order was determined by HAR analysis. If dana updates their export format, `mapColumns_` in `DanaImport.gs` will need updating. The function uses name-matching not position, so minor reordering is handled - but renamed columns will break it.
-4. **Script Properties are the only config store.** Do not hardcode `SHEET_ID`, `TOKEN_SECRET`, or credentials. Do not commit `.clasp.json` with a production script ID if it points to prod data.
-5. **`<?!= ?>` not `<?= ?>`** for JS variables in HTML templates. Apps Script's contextual escaping breaks base64 tokens. Always use force-print (`<?!= ?>`) for JS literals in `<script>` tags.
-6. **Write-back posts `email=0&whatsapp=0`** to suppress donor notifications. If a future version of the dana edit form changes checkbox field names, the write-back will silently trigger notifications.
-
-### Future Improvements
-
-- Add a menu item to install the monthly import trigger (mirror of hourly write-back trigger install)
-- Cache `receipt_no → donation_id` mapping during import so write-back never needs a re-fetch
-- Add a simple status dashboard sheet (counts of need_pan / have_pan / dana_updated by import batch)
-- Consider GCP Secret Manager for credentials if the project grows beyond 3-4 admins
-- Financial year filtering in the 80G export (Indian FY: April 1 - March 31)
-
----
+- Cloudflare challenges or changed Drupal markup can interrupt portal operations.
+  The XLS upload dialog is the manual import fallback; uploaded reports do not
+  include HTML receipt-to-donation-ID mappings, so write-back may fetch them later.
+- Offline tests do not verify the complete live donor-to-portal workflow. The
+  [review](docs/REVIEW.md) describes what has and has not been exercised.
+- PAN is not encrypted at the application layer in its permitted storage columns.
+  Masked logs and views can still contain donor identifiers and need restricted access.
+- No automatic token expiry, per-donor link revocation, or donor-form rate limiter
+  is implemented. Historical rows/logs and the stored submission token are not
+  removed by deploying a fix. Retention and cleanup require a separate decision.
+- Export currently includes all eligible rows; financial-year filtering and a
+  monthly-trigger installer menu are not implemented.
 
 ## Troubleshooting
 
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `SHEET_ID script property not set` | Missing Script Property | Set `SHEET_ID` in ⚙ → Script Properties |
-| `TOKEN_SECRET script property not configured` | Missing | Set `TOKEN_SECRET` (generate with `openssl rand -hex 32`) |
-| `WEB_APP_URL script property not set` | Missing after deploy | Set `WEB_APP_URL` to the deployed web app URL |
-| No email when a trigger fails | `ADMIN_EMAIL` Script Property not set | Set `ADMIN_EMAIL`; failures are always in the execution log |
-| `The URL ... is not permitted` on fetch | Host missing from `urlFetchWhitelist` | Add the new dana/360dialog host to `urlFetchWhitelist` in `appsscript.json`, `clasp push` |
-| `Login appeared to succeed but no SESS/SSESS cookie` | Bad DANA_USER or DANA_PASS | Re-encode password: `echo -n 'pass' \| base64`. Verify username. |
-| `Cloudflare blocked the request (HTTP 403/503)` | Cloudflare challenge | Use 80G Admin → Import XLS from Computer as fallback |
-| `Got HTML instead of XLS` | Session expired mid-flow or Cloudflare | Re-run import; if persists, use manual XLS upload |
-| `Could not find Receipt No column` | Dana changed export column names | Update `mapColumns_()` in `DanaImport.gs` |
-| `donors_input sheet is missing dana_donation_id / dana_updated_at columns` | Old schema | Run **80G Admin → Migrate Schema** |
-| `Invalid or tampered submission token` | TOKEN_SECRET changed after email was sent; or HTML escaping corrupted token | Ensure `<?!= JSON.stringify(token) ?>` in Form.html (not `<?= ?>`). Check if TOKEN_SECRET changed. |
-| `No pending PAN requests found` | Donor already submitted, or pan_status already updated | Check donors_input for email - all rows may already be `have_pan` |
-| `Edit POST HTTP 200 (expected 302)` | Dana edit form validation failed (field value error) | Check audit_log; inspect the donation_id manually in dana portal |
-| Invalid token with no diagnostic token values | Token values are deliberately never logged | Check configuration and reopen the original donor link; do not log expected or received tokens |
-| `You do not have permission to call drive.files...` | Code uses `DriveApp`/`Drive.*` advanced service, which need the full `drive` scope | Use the Drive REST helpers in `DanaImport.gs` (`driveCreateSheetFromBlob_`, `driveDeleteFile_`) instead |
-| Gmail permission error | Wrong OAuth scope | Code uses `MailApp` (script.send_mail); if you see Gmail errors, check appsscript.json scopes |
+| Symptom | Check / action |
+|---|---|
+| Admin action says it requires the bound spreadsheet | Open the configured Sheet's menu/editor; verify `SHEET_ID`. Anonymous rejection is expected. Preserve native events for clock handlers. |
+| Missing `SHEET_ID`, `TOKEN_SECRET`, or `WEB_APP_URL` | Configure Script Properties privately; preserve the signing secret on existing installations |
+| Cloudflare 403/503 or HTML instead of XLS | Retry the import; use the XLS/XLSX upload fallback if it persists |
+| Missing receipt column or donation-ID mapping | Check report headers/table structure; do not guess IDs across rows |
+| Missing Y/Z columns | Use **80G Admin → Migrate Schema**; preserve A-Z order |
+| Invalid donor link | Reopen the original link; check secret continuity and force-printed token template without logging token values |
+| Already submitted / no pending requests | Check row status; one submission covers all pending receipts for that email |
+| Edit POST returns 200 instead of 302 | Use masked GET-only diagnosis for live required-field/validation failures |
+| Drive permission error | Use the REST conversion helpers, not the advanced service or `DriveApp` |
+| Trigger fails silently | Inspect Apps Script executions; set `ADMIN_EMAIL` for supported failure alerts |
 
----
+## Maintenance and community
 
-## Maintenance Notes
+Keep column indexes, token bytes, trigger handler names, and audit masking stable.
+Update [AGENTS.md](AGENTS.md) for operational rules and
+[docs/DECISIONS.md](docs/DECISIONS.md) for non-obvious changes. After committing,
+refresh `graphify-out/` through the graphify skill with the `.gs` runtime patch.
+Do not run bare `graphify update .` here. Preserve the cache; changed documents and
+HTML need semantic extraction, which can consume tokens. See [docs/GRAPHIFY.md](docs/GRAPHIFY.md).
 
-### Safe to Change
-
-- `Email.gs` - email templates, reminder thresholds (currently 3d/7d, max 2)
-- `Admin.gs` - menu items, color scheme in admin_review
-- `Form.html` - form UI/copy (do not change variable names `TOKEN`, `EMAIL`, or the `submitForm` call signature)
-- `WRITEBACK_MAX_PER_RUN` and `WRITEBACK_MAX_CONSECUTIVE_ERRORS` constants in `WriteBack.gs`
-
-### Change With Care
-
-- `Utils.gs / generateToken_()` - changing token format invalidates all outstanding links
-- `Code.gs / submitForm()` - changing which columns are written affects donors_input schema
-- `DanaImport.gs / mapColumns_()` - if dana adds/renames columns, update name-to-index mapping
-- `appsscript.json / oauthScopes` - adding scopes requires user re-authorization
-
-### Do Not Touch Without Full Review
-
-- `TOKEN_SECRET` Script Property - changing it breaks all outstanding donor links
-- `drivers_input` column order (A-Z) - all code references columns by index; reordering breaks everything
-- `DANA_ID_TYPE_PAN = '1'` in `WriteBack.gs` - this constant came from HAR analysis of the dana edit form. Verify it still holds if dana is upgraded.
-
-### Adding New Columns to `donors_input`
-
-1. Add the column name to `initSheets()` in `Code.gs`
-2. Add population logic in `processRows_()` in `DanaImport.gs` (append to the `newRows.push([...])` array)
-3. Add the column header to `migrateSchema()` in `Code.gs` for existing users
-4. Update any downstream functions that read by index (Admin.gs, WriteBack.gs, Code.gs submitForm)
-
-### How to Validate Changes
-
-1. `clasp push` to push code
-2. Run `runAllTests` from the Apps Script editor (covers PAN + token logic)
-3. Run `testDanaImportLogin` to verify dana credentials still work
-4. Run `previewWriteBackToDana` (dry run) before any real write-back
-5. Check Apps Script Execution Log (left sidebar, clock icon) for any errors
-6. After committing, refresh the knowledge graph through the graphify skill
-   pipeline with the `.gs` patch (see [docs/GRAPHIFY.md](docs/GRAPHIFY.md)).
-
-### Credential Rotation
-
-1. Change password in dana portal
-2. `echo -n 'NewPassword' | base64` → copy output
-3. Apps Script ⚙ → Script Properties → update `DANA_PASS`
-4. Run `testDanaImportLogin` to confirm
+Contributions follow [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md). Report vulnerabilities through
+[SECURITY.md](SECURITY.md), not a public issue. The software is available under the
+[MIT License](LICENSE); the license is not permission to access production donor data.

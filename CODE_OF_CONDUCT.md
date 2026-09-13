@@ -32,9 +32,10 @@ Examples of unacceptable behavior include:
 - Trolling, insulting or derogatory comments, and personal or political attacks
 - Public or private harassment
 - Publishing others' private information, such as a physical or email address,
-  without their explicit permission — **in this project that explicitly
-  includes donor personal or financial data (names, emails, mobiles, PAN,
-  amounts) in any issue, PR, or discussion**
+  without their explicit permission - **in this project that explicitly
+  includes donor personal or financial data, identity-document values, signed
+  donor links, credentials, and private incident reports in issues, PRs,
+  discussions, screenshots, or test fixtures**
 - Other conduct which could reasonably be considered inappropriate in a
   professional setting
 
@@ -52,15 +53,26 @@ moderation decisions when appropriate.
 
 ## Scope
 
-This Code of Conduct applies within all community spaces, and also applies when
-an individual is officially representing the community in public spaces.
+This Code of Conduct applies to repository issues, pull requests, reviews,
+discussions, and other project community spaces. It also applies when an individual
+is officially representing the community in public spaces. Technical disagreement
+is welcome; personal attacks, retaliation, and disclosure of private data are not.
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the maintainer, @kapaggar, via a private GitHub message or by
-opening an issue requesting a private channel. All complaints will be reviewed
-and investigated promptly and fairly.
+Report unacceptable behavior to the repository maintainer,
+[@kapaggar](https://github.com/kapaggar), through an established private contact
+channel. If you do not have one, open an issue requesting a private Code of Conduct
+contact. Include only that request: do not publish allegations, identifying details,
+private correspondence, or donor data. Wait for a private channel before sending
+evidence. A GitHub mention or profile page is not a private messaging service.
+
+Security vulnerabilities, leaked credentials, and donor-data exposure should use
+the private reporting process in [SECURITY.md](SECURITY.md). Do not put unrelated
+conduct complaints in the security advisory queue.
+
+Reports will be reviewed fairly, and follow-up will take place through the agreed
+private channel. The small maintainer team does not promise a fixed response time.
 
 All community leaders are obligated to respect the privacy and security of the
 reporter of any incident.
